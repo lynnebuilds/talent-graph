@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """Unit tests for LLM Client"""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 from pydantic import BaseModel, Field
+
 from configs.settings import Settings
 from src.core.llm_client import LLMClient
 

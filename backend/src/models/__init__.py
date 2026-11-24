@@ -3,6 +3,14 @@
 TalentGraph Domain Models Package
 """
 
+from src.models.discussion import (
+    DiscussionTranscript,
+    InteractionEdge,
+    InteractionNetwork,
+    InteractionType,
+    Speaker,
+    Utterance,
+)
 from src.models.graph import (
     Arc,
     ArcType,
@@ -13,22 +21,6 @@ from src.models.graph import (
     NodeType,
     StandardGraph,
 )
-from src.models.discussion import (
-    DiscussionTranscript,
-    InteractionEdge,
-    InteractionNetwork,
-    InteractionType,
-    Speaker,
-    Utterance,
-)
-from src.models.score import (
-    ALL_DIMENSIONS,
-    DIMENSION_MAP,
-    DimensionDefinition,
-    DimensionScore,
-    ParticipantScoreProfile,
-    ScoreMatrix,
-)
 from src.models.report import (
     CollaborationNetworkDTO,
     ComprehensiveDiagnosis,
@@ -37,6 +29,14 @@ from src.models.report import (
     RadarPoint,
     ReportData,
     TeamOverview,
+)
+from src.models.score import (
+    ALL_DIMENSIONS,
+    DIMENSION_MAP,
+    DimensionDefinition,
+    DimensionScore,
+    ParticipantScoreProfile,
+    ScoreMatrix,
 )
 
 __all__ = [

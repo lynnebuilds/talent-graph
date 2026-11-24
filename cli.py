@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -24,11 +25,10 @@ backend_dir = Path(__file__).parent / "backend"
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
-from configs.settings import get_settings
-from src.knowledge.cache import get_graph_cache_manager
-from src.pipeline.runner import PipelineRunner
-from src.reporting.generator import ReportGenerator
-from src.reporting.pdf_service import PDFExportService
+from configs.settings import get_settings  # noqa: E402
+from src.knowledge.cache import get_graph_cache_manager  # noqa: E402
+from src.pipeline.runner import PipelineRunner  # noqa: E402
+from src.reporting.generator import ReportGenerator  # noqa: E402
 
 app = typer.Typer(
     name="talent",
@@ -194,14 +194,13 @@ def benchmark():
     from src.core.embedding import get_embedding_engine
     emb = get_embedding_engine()
     t0 = time.perf_counter()
-    vecs = emb.embed_texts(["这是一段商业决策测试文本", "我们需要降低运营成本", "开拓海外新兴市场"] * 10)
+    emb.embed_texts(["这是一段商业决策测试文本", "我们需要降低运营成本", "开拓海外新兴市场"] * 10)
     emb_time = (time.perf_counter() - t0) * 1000.0
     console.print(f"• CPU 句向量批量编码 (30句): [bold green]{emb_time:.2f}ms[/bold green]")
 
     # 2. 评分引擎测试
-    from src.models.discussion import DiscussionTranscript, Speaker, Utterance
+    from src.models.discussion import DiscussionTranscript, InteractionNetwork, Speaker, Utterance
     from src.models.graph import Node, StandardGraph
-    from src.models.discussion import InteractionNetwork
     from src.scoring.base import ScoringContext
     from src.scoring.engine import ScoringEngine
 
@@ -221,7 +220,7 @@ def benchmark():
 
     engine = ScoringEngine()
     t1 = time.perf_counter()
-    matrix = engine.evaluate_all(ctx)
+    engine.evaluate_all(ctx)
     score_time = (time.perf_counter() - t1) * 1000.0
     console.print(f"• 16 维度纯数学图论评分 (12人全员): [bold green]{score_time:.2f}ms[/bold green]")
 

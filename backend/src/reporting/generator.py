@@ -6,13 +6,12 @@ Aggregates Pipeline, Scoring, and Summaries into the unified ReportData JSON sch
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
+
 from configs.settings import Settings, get_settings
 from src.core.embedding import EmbeddingEngine, get_embedding_engine
 from src.core.logger import get_logger
 from src.models.discussion import InteractionNetwork
-from src.models.graph import CandidateGraph, StandardGraph
 from src.models.report import (
     CollaborationNetworkDTO,
     ComprehensiveDiagnosis,
@@ -21,7 +20,7 @@ from src.models.report import (
     ReportData,
     TeamOverview,
 )
-from src.models.score import ALL_DIMENSIONS, ScoreMatrix
+from src.models.score import ALL_DIMENSIONS
 from src.pipeline.runner import PipelineResult
 from src.reporting.summarizer import CandidateSummarizer
 from src.scoring.base import ScoringContext

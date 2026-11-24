@@ -4,13 +4,13 @@ Assessment API Routes.
 Endpoints for submitting evaluation tasks, checking progress, retrieving ReportData, and exporting PDF.
 """
 
-import asyncio
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+
 from configs.settings import get_settings
 from src.api.websocket import get_progress_manager
 from src.core.logger import get_logger

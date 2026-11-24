@@ -13,8 +13,10 @@ import argparse
 import asyncio
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, Optional, Union
+
 from pydantic import BaseModel, Field
+
 from configs.settings import Settings, get_settings
 from src.core.embedding import EmbeddingEngine, get_embedding_engine
 from src.core.llm_client import LLMClient, get_llm_client

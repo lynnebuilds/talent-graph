@@ -2,8 +2,10 @@
 """Unit tests for CPU Embedding Engine"""
 
 import time
+
 import numpy as np
-from src.core.embedding import EmbeddingEngine, get_embedding_engine
+
+from src.core.embedding import get_embedding_engine
 
 
 def test_embedding_shape_and_norm():

@@ -6,10 +6,10 @@ Zero LLM calls, zero disk I/O, zero matplotlib drawing.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Set
-import numpy as np
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
-from src.core.embedding import EmbeddingEngine
+
 from src.models.discussion import DiscussionTranscript, InteractionNetwork, Speaker
 from src.models.graph import CandidateGraph, StandardGraph
 from src.models.score import DimensionScore

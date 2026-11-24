@@ -8,7 +8,9 @@ Dimension 6: Process Driving & Efficiency Competence Scorers (讨论控场与推
 
 import re
 from typing import Any, Dict, List
+
 import numpy as np
+
 from src.core.embedding import get_embedding_engine
 from src.models.score import DimensionScore
 from src.scoring.base import BaseDimensionScorer, ScoringContext, normalize_to_standard_score

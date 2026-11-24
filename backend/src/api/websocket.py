@@ -3,9 +3,10 @@
 WebSocket Connection & Real-Time Assessment Progress Manager.
 """
 
-import asyncio
-from typing import Dict, List, Set
-from fastapi import WebSocket, WebSocketDisconnect
+from typing import Dict, Optional, Set
+
+from fastapi import WebSocket
+
 from src.core.logger import get_logger
 
 logger = get_logger("websocket_manager")
@@ -42,7 +43,7 @@ class ProgressManager:
         progress: int,
         stage: str,
         message: str = "",
-        data: dict = None,
+        data: Optional[dict] = None,
     ):
         """向所有监听该任务的客户端推送进度 (0 ~ 100)"""
         payload = {

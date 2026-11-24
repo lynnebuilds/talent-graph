@@ -68,3 +68,10 @@ exclude = [".git", "__pycache__", "build", "dist", ".venv"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+
+[[tool.mypy.overrides]]
+module = ["networkx.*", "jieba.*", "onnxruntime.*"]
+ignore_missing_imports = true

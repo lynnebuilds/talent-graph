@@ -7,8 +7,9 @@ Dimension 2: Execution & Decision-Making Competence Scorers (决策能力 - 100%
 """
 
 from typing import Any, Dict, List, Set, Tuple
+
 import networkx as nx
-import numpy as np
+
 from src.scoring.base import BaseDimensionScorer, ScoringContext
 
 

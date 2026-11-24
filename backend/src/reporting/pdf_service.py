@@ -4,9 +4,9 @@ Playwright-based Headless PDF Export Service.
 Renders pixel-perfect A4 printable reports locally in <1.2 seconds without external tools.
 """
 
-import asyncio
 from pathlib import Path
 from typing import Optional, Union
+
 from configs.settings import Settings, get_settings
 from src.core.logger import get_logger
 

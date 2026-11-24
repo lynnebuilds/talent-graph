@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Unit tests for configuration center"""
 
-import os
 from pathlib import Path
-from configs.settings import Settings, get_settings
+
+from configs.settings import Settings
 
 
 def test_default_settings():

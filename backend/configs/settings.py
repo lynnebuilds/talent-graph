@@ -7,6 +7,7 @@ Based on Pydantic V2 and pydantic-settings.
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Literal, Optional, Union
+
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

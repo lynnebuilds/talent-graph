@@ -6,7 +6,9 @@ via pure-NumPy vectorized Minorize-Maximize (EM) maximum likelihood estimation (
 """
 
 from typing import Any, Dict, List, Set
+
 import numpy as np
+
 from src.core.embedding import get_embedding_engine
 from src.models.discussion import Utterance
 from src.models.score import DimensionScore

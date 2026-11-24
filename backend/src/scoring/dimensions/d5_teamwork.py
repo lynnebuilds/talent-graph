@@ -7,7 +7,9 @@ Dimension 5: Conflict Resolution & Teamwork Competence Scorers (冲突协调能�
 """
 
 from typing import Any, Dict, List
+
 import networkx as nx
+
 from src.scoring.base import BaseDimensionScorer, ScoringContext
 
 

@@ -3,7 +3,8 @@
 Domain models for 16-Dimension Scoring System, Matrices, and Quant Evaluation.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
 from pydantic import BaseModel, Field
 
 

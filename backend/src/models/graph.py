@@ -3,7 +3,8 @@
 Domain models for Knowledge Graph, Influence Diagrams, and Topological Networks.
 """
 
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Dict, List, Literal, Optional, Set
+
 import networkx as nx
 from pydantic import BaseModel, Field, model_validator
 

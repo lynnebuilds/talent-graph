@@ -9,6 +9,7 @@ Generates in ONE SINGLE concurrent LLM request per candidate:
 
 import asyncio
 from typing import Dict, Optional
+
 from configs.settings import Settings, get_settings
 from src.core.llm_client import LLMClient, get_llm_client
 from src.core.logger import get_logger

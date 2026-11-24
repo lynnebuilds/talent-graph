@@ -4,6 +4,7 @@ Domain models for Group Discussion Parsing, Utterances, Speakers, and Interactio
 """
 
 from typing import Dict, List, Literal, Optional
+
 import networkx as nx
 from pydantic import BaseModel, Field, model_validator
 

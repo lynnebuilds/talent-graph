@@ -6,7 +6,9 @@ Unified schema used for both Backend APIs, Frontend Visualizations, and PDF Prin
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
+
 from src.models.score import DimensionScore
 
 

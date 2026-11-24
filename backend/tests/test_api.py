@@ -4,14 +4,15 @@ Unit Tests for Module 5: Diagnostic Summarizer, Report Generator, and FastAPI En
 """
 
 from unittest.mock import AsyncMock, MagicMock
-from fastapi.testclient import TestClient
+
 import pytest
+from fastapi.testclient import TestClient
+
 from server import app
 from src.core.llm_client import LLMClient
 from src.models.discussion import DiscussionTranscript, InteractionNetwork, Speaker, Utterance
-from src.models.graph import Arc, CandidateGraph, Node, StandardGraph
+from src.models.graph import CandidateGraph, Node, StandardGraph
 from src.models.report import ComprehensiveDiagnosis, ReportData
-from src.models.score import ScoreMatrix
 from src.pipeline.runner import PipelineResult
 from src.reporting.generator import ReportGenerator
 from src.reporting.summarizer import CandidateSummarizer
@@ -50,7 +51,6 @@ async def test_candidate_summarizer_heuristic_and_mock():
     u1 = Utterance(index=0, speaker_id="speaker_2", speaker_name="候选人 2", text="我的方案如下...", start_time_str="01:00", start_seconds=60.0)
     spk2 = Speaker(speaker_id="speaker_2", display_name="候选人 2", utterances=[u1], is_host=False)
 
-    matrix = ScoreMatrix(group_id="group_1")
     engine = ScoringEngine()
     std_graph = StandardGraph(corpus_id="c1", title="案例", nodes=[Node(id="c1", name="节点", type="c")], arcs=[])
     transcript = DiscussionTranscript(group_id="group_1", title="讨论", speakers={"speaker_2": spk2}, utterances=[u1])

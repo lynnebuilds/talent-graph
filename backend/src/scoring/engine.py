@@ -7,9 +7,10 @@ Ultra-fast execution (<10ms per candidate, <50ms for the entire team).
 
 import time
 from typing import Dict, List, Optional
+
 from configs.settings import Settings, get_settings
 from src.core.logger import get_logger
-from src.models.score import ALL_DIMENSIONS, DimensionScore, ParticipantScoreProfile, ScoreMatrix
+from src.models.score import DimensionScore, ParticipantScoreProfile, ScoreMatrix
 from src.scoring.base import BaseDimensionScorer, ScoringContext
 from src.scoring.dimensions.d1_thinking import AbstractionScorer, LogicalReasoningScorer, SystematicThinkingScorer
 from src.scoring.dimensions.d2_execution import GoalDecompositionScorer, ImpactPredictionScorer, InfoCollectionScorer

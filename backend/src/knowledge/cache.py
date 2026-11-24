@@ -7,6 +7,7 @@ Enables 0-second instant graph retrieval when corpus text has already been parse
 import hashlib
 from pathlib import Path
 from typing import Optional, Union
+
 from configs.settings import Settings, get_settings
 from src.core.logger import get_logger
 from src.knowledge.extractor import StandardGraphExtractor

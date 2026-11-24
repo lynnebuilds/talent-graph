@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """Unit tests for Discussion Parser and Interaction Extractor"""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from src.models.discussion import InteractionEdge, InteractionNetwork
+
+import pytest
+
 from src.pipeline.interaction import ExtractedInteractionItem, InteractionExtractor, InteractionPayload
 from src.pipeline.parser import DiscussionParser
 

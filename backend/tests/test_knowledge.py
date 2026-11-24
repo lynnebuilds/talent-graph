@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """Unit tests for Knowledge Graph Extraction and Cache Manager"""
 
-import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from configs.settings import Settings
 from src.knowledge.cache import GraphCacheManager
 from src.knowledge.extractor import GraphExtractionPayload, StandardGraphExtractor
-from src.models.graph import Arc, Node, StandardGraph
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,9 @@ Dimension 1: Thinking Competence Scorers (思维能力 - 100% 对齐 V5 影响�
 """
 
 from typing import Any, Dict, List, Set, Tuple
+
 import networkx as nx
+
 from src.scoring.base import BaseDimensionScorer, ScoringContext
 
 

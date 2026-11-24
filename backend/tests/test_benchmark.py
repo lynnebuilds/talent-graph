@@ -6,8 +6,9 @@ Validates latency targets (<60s end-to-end, <100ms pure scoring) and 16-dimensio
 
 import time
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from src.core.embedding import get_embedding_engine
+
 from src.core.llm_client import LLMClient
 from src.knowledge.cache import GraphCacheManager
 from src.models.discussion import DiscussionTranscript, InteractionNetwork, Speaker, Utterance

@@ -4,11 +4,12 @@ Unit Tests for Module 3: Node Matching, Dual-Pruned Arc Verification, and Pipeli
 """
 
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from src.core.embedding import EmbeddingEngine
+
 from src.core.llm_client import LLMClient
 from src.knowledge.cache import GraphCacheManager
-from src.models.discussion import DiscussionTranscript, Speaker, Utterance
+from src.models.discussion import Speaker, Utterance
 from src.models.graph import Arc, CandidateGraph, Node, StandardGraph
 from src.pipeline.arc_verifier import ArcVerificationItem, ArcVerificationPayload, CandidateArcVerifier
 from src.pipeline.node_matcher import CandidateNodeMatcher, MatchedNodeItem, NodeMatchPayload, NovelNodeItem

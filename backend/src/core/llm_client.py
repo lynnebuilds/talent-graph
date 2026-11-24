@@ -15,9 +15,24 @@ import random
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
-import httpx
-from openai import AsyncOpenAI, APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
+
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    DefaultAsyncHttpxClient,
+    RateLimitError,
+    Timeout,
+)
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
+
+try:
+    from httpx2 import Limits as HttpxLimits
+except ImportError:  # pragma: no cover - fallback for openai 1.x environments
+    from httpx import Limits as HttpxLimits  # type: ignore[assignment,no-redef]
+
 from configs.settings import Settings, get_settings
 from src.core.logger import get_logger
 
@@ -47,14 +62,14 @@ class LLMClient:
             base_url = self.settings.deepseek_base_url
             self.default_model = self.settings.deepseek_model
 
-        http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(
+        http_client = DefaultAsyncHttpxClient(
+            timeout=Timeout(
                 connect=10.0,
                 read=self.settings.llm_timeout,
                 write=10.0,
                 pool=10.0,
             ),
-            limits=httpx.Limits(
+            limits=HttpxLimits(
                 max_keepalive_connections=self.settings.llm_max_concurrency * 2,
                 max_connections=self.settings.llm_max_concurrency * 3,
             ),
@@ -82,7 +97,7 @@ class LLMClient:
     ) -> str:
         """发起单次文本生成请求（带并发信号量与重试保护）"""
         target_model = model or self.default_model
-        messages = []
+        messages: List[ChatCompletionMessageParam] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})

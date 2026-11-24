@@ -10,7 +10,9 @@ Implements:
 
 import asyncio
 from typing import Dict, List, Optional, Set, Tuple
+
 from pydantic import BaseModel, Field
+
 from configs.settings import Settings, get_settings
 from src.core.llm_client import LLMClient, get_llm_client
 from src.core.logger import get_logger
@@ -106,7 +108,7 @@ class CandidateArcVerifier:
                 f"【候选人】：{speaker.display_name} ({speaker.speaker_id})\n"
                 f"【候选人发言原文节选】：\n\"\"\"\n{speaker_excerpt}\n\"\"\"\n\n"
                 f"【待核实的候选边清单】：\n" + "\n".join(arc_items_text) + "\n\n"
-                f"请逐条核实并输出 verified_arcs。"
+                "请逐条核实并输出 verified_arcs。"
             )
 
             payload: ArcVerificationPayload = await self.llm.chat_json(

@@ -13,10 +13,12 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import httpx
 import jieba
 import numpy as np
+
 from configs.settings import Settings, get_settings
 from src.core.logger import get_logger
 
@@ -46,9 +48,9 @@ class EmbeddingEngine:
         self.vector_dim = vector_dim
         self._cache: Dict[str, np.ndarray] = {}
         self._lock = threading.Lock()
-        self._onnx_session = None
+        self._onnx_session: Optional[Any] = None
         self._onnx_input_names: List[str] = []
-        self._tokenizer = None
+        self._tokenizer: Optional[Any] = None
         self._backend_mode: str = "native"
 
         provider = (self.settings.embedding_provider or "onnx").lower()
@@ -212,6 +214,8 @@ class EmbeddingEngine:
 
     def _embed_onnx_batch(self, texts: List[str]) -> np.ndarray:
         """执行纯 CPU ONNX Runtime 批量神经网络前向推理 (BGE CLS Pooling + L2 Norm)"""
+        if self._tokenizer is None or self._onnx_session is None:
+            raise RuntimeError("ONNX session or tokenizer is not initialized.")
         cleaned = [t.replace("\n", " ").strip() or " " for t in texts]
         batch_size = max(1, self.settings.embedding_batch_size)
         chunks_out: List[np.ndarray] = []
@@ -420,7 +424,7 @@ class EmbeddingEngine:
         if norm1 < 1e-6 or norm2 < 1e-6:
             return 0.0
         dot = float(np.dot(vec1, vec2))
-        sim = dot / (norm1 * norm2)
+        sim = float(dot / (norm1 * norm2))
         return max(-1.0, min(1.0, sim))
 
     @classmethod

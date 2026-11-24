@@ -2,13 +2,12 @@
 """Unit tests for Domain Models"""
 
 import networkx as nx
+
 from src.models import (
     ALL_DIMENSIONS,
     DIMENSION_MAP,
     Arc,
-    CandidateGraph,
     ComprehensiveDiagnosis,
-    DiscussionTranscript,
     InteractionEdge,
     InteractionNetwork,
     Node,
@@ -17,7 +16,6 @@ from src.models import (
     RadarPoint,
     ReportData,
     ScoreMatrix,
-    Speaker,
     StandardGraph,
     Utterance,
 )
@@ -70,6 +68,7 @@ def test_discussion_models():
     u2 = Utterance(index=1, speaker_id="speaker_3", speaker_name="说话人 3", text="非常赞同2号的观点，线上成本更低", start_time_str="01:30")
 
     assert u1.word_count > 0
+    assert u2.word_count > 0
 
     edge = InteractionEdge(source="speaker_3", target="speaker_2", type="support", weight=1.0, evidence="非常赞同2号的观点")
     net = InteractionNetwork(speakers=["speaker_2", "speaker_3"], edges=[edge])

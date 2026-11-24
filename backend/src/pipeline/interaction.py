@@ -10,7 +10,9 @@ Supports concurrent sliding-window extraction for ultra-long transcripts (>16,00
 
 import asyncio
 from typing import Dict, List, Optional, Set, Tuple
+
 from pydantic import BaseModel, Field
+
 from configs.settings import Settings, get_settings
 from src.core.llm_client import LLMClient, get_llm_client
 from src.core.logger import get_logger

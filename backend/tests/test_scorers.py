@@ -4,8 +4,9 @@ Unit Tests for Module 4: 16 Pure-Mathematical Quant Scorers and In-Memory Scorin
 """
 
 import time
+
 import pytest
-from src.core.embedding import EmbeddingEngine
+
 from src.models.discussion import DiscussionTranscript, InteractionEdge, InteractionNetwork, Speaker, Utterance
 from src.models.graph import Arc, CandidateGraph, Node, NodeMention, StandardGraph
 from src.models.score import ALL_DIMENSIONS

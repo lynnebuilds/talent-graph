@@ -7,10 +7,12 @@ Dimension 3: Creativity & Innovation Competence Scorers (创新能力 - 100% 对
 """
 
 from typing import Any, Dict, List, Set, Tuple
+
 import networkx as nx
+
+from src.core.embedding import get_embedding_engine
 from src.models.score import DimensionScore
 from src.scoring.base import BaseDimensionScorer, ScoringContext, normalize_to_standard_score
-from src.core.embedding import get_embedding_engine
 
 
 class CreativityScorer(BaseDimensionScorer):

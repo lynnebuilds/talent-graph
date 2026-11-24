@@ -14,8 +14,10 @@ import asyncio
 import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+
 import numpy as np
 from pydantic import BaseModel, Field
+
 from configs.settings import Settings, get_settings
 from src.core.embedding import EmbeddingEngine, get_embedding_engine
 from src.core.llm_client import LLMClient, get_llm_client
@@ -277,7 +279,7 @@ class StandardGraphExtractor:
                     except Exception:
                         node_vec = None
 
-                if matched_idx == -1 and node_vec is not None and existing_group:
+                if matched_idx == -1 and embedding_engine is not None and node_vec is not None and existing_group:
                     exist_vecs = [e["_vec"] for e in existing_group if e.get("_vec") is not None]
                     if len(exist_vecs) == len(existing_group):
                         sims = embedding_engine.compute_similarity(node_vec, exist_vecs)
