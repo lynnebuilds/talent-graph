@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from configs.settings import Settings, get_settings
 from src.core.logger import get_logger
-from src.models.score import DimensionScore, ParticipantScoreProfile, ScoreMatrix
+from src.models.score import ALL_DIMENSIONS, DimensionScore, ParticipantScoreProfile, ScoreMatrix
 from src.scoring.base import BaseDimensionScorer, ScoringContext
 from src.scoring.dimensions.d1_thinking import AbstractionScorer, LogicalReasoningScorer, SystematicThinkingScorer
 from src.scoring.dimensions.d2_execution import GoalDecompositionScorer, ImpactPredictionScorer, InfoCollectionScorer
@@ -53,6 +53,24 @@ class ScoringEngine:
         ]
         self.scorer_map = {s.SCORER_ID: s for s in self.scorers}
 
+    @staticmethod
+    def compute_total_score(dimension_scores: Dict[str, DimensionScore]) -> float:
+        """
+        对齐 V5 summary.py 总分计算方式：先按 6 大能力模块求类内均分，再取 6 大类等权均值
+        （维度 4 占 1/6 ≈ 16.67%，其余 15 个子维度各占 1/18 ≈ 5.56%）。
+        """
+        if not dimension_scores:
+            return 0.0
+        cat_buckets: Dict[str, List[float]] = {}
+        for dim_def in ALL_DIMENSIONS:
+            if dim_def.id in dimension_scores:
+                cat_buckets.setdefault(dim_def.category, []).append(dimension_scores[dim_def.id].score)
+        if not cat_buckets:
+            scores_list = [ds.score for ds in dimension_scores.values()]
+            return round(sum(scores_list) / len(scores_list), 1)
+        cat_means = [sum(vals) / len(vals) for vals in cat_buckets.values() if vals]
+        return round(sum(cat_means) / len(cat_means), 1)
+
     def evaluate_all(self, context: ScoringContext) -> ScoreMatrix:
         """
         在纯内存中执行全量 16 个评分器，生成标准评分矩阵与团队大盘
@@ -80,11 +98,10 @@ class ScoringEngine:
                 if spk_id in matrix.participants:
                     matrix.participants[spk_id].dimension_scores[scorer.SCORER_ID] = d_score
 
-        # 计算每个候选人的综合加权总分
+        # 计算每个候选人的综合加权总分（对齐 V5 6 大类等权均值）
         for spk_id, profile in matrix.participants.items():
             if profile.dimension_scores:
-                scores_list = [ds.score for ds in profile.dimension_scores.values()]
-                profile.total_score = round(sum(scores_list) / len(scores_list), 1)
+                profile.total_score = self.compute_total_score(profile.dimension_scores)
 
         # 聚合计算全场均分、极值与排名
         matrix.compute_aggregations()

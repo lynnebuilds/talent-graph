@@ -25,6 +25,7 @@ logger = get_logger("arc_verifier")
 class ArcVerificationItem(BaseModel):
     source: str = Field(..., description="起点节点ID (如 d1)")
     target: str = Field(..., description="终点节点ID (如 u1)")
+    type: Optional[str] = Field(default=None, description="边类型 (causal / info / update)，平行边时必填")
     is_valid: bool = Field(default=True, description="候选人发言中是否确实表达了该因果/逻辑关系")
     reasoning: str = Field(default="", description="简短逻辑依据(可选)")
     weight: float = Field(default=1.0, description="关系强度权重 (0.5 ~ 1.0)")
@@ -35,12 +36,12 @@ class ArcVerificationPayload(BaseModel):
 
 
 ARC_VERIFY_SYSTEM_PROMPT = """你是一名严谨的逻辑推理与因果图分析专家。
-你的任务是核实候选人在讨论发言中，是否确实表达了待核实清单中两个知识节点之间的逻辑/因果/信息支撑关系（含显式推导或清晰的上下文隐含关联）。
+你的任务是核实候选人在讨论发言中，是否确实表达了待核实清单中两个知识节点之间的逻辑/因果/信息支撑/证据更新关系（含显式推导或清晰的上下文隐含关联）。
 
 【关系验证原则】
-- 当候选人在言论中将 source 节点与 target 节点进行了因果推导、手段-目的联结或信息支撑时，is_valid 设为 True；
+- 当候选人在言论中将 source 节点与 target 节点进行了因果推导 (causal)、信息支撑决策 (info) 或以已知事实更新对未知信息的判断 (update) 时，is_valid 设为 True；
 - 若仅仅是在完全无关的语境下孤立提到两词、无实质逻辑关联，is_valid 设为 False；
-- 请对清单中的候选边给出判断，reasoning 保持简短（15字以内或留空）以加速输出。"""
+- 请对清单中的候选边给出判断并保留对应的 type，reasoning 保持简短（15字以内或留空）以加速输出。"""
 
 
 class CandidateArcVerifier:
@@ -83,8 +84,12 @@ class CandidateArcVerifier:
             if m.quote:
                 node_quotes.setdefault(m.node_id, []).append(f"[t={m.timestamp_seconds:.0f}s] {m.quote}")
 
-        # 候选人核心原文摘要（最多取 3500 字供全局语境核验，对齐 V5 ArcVerifyAgent 回源验证）
-        speaker_excerpt = speaker.full_text()[:3500]
+        # 候选人原文摘要（超长发言保留首尾各 3000 字，避免后半段因果推理失去上下文）
+        full_speech = speaker.full_text()
+        if len(full_speech) <= 6000:
+            speaker_excerpt = full_speech
+        else:
+            speaker_excerpt = f"{full_speech[:3000]}\n...（中段略）...\n{full_speech[-3000:]}"
 
         batch_size = 45
         arc_batches = [candidate_arcs[i : i + batch_size] for i in range(0, len(candidate_arcs), batch_size)]
@@ -96,8 +101,8 @@ class CandidateArcVerifier:
                 tgt_node = standard_graph.get_node(a.target)
                 src_name = src_node.name if src_node else a.source
                 tgt_name = tgt_node.name if tgt_node else a.target
-                src_quotes = " | ".join(node_quotes.get(a.source, [])[:2])
-                tgt_quotes = " | ".join(node_quotes.get(a.target, [])[:2])
+                src_quotes = " | ".join(node_quotes.get(a.source, [])[:3])
+                tgt_quotes = " | ".join(node_quotes.get(a.target, [])[:3])
 
                 line = f"- [{a.source} -> {a.target}] ({a.type}): {src_name} -> {tgt_name}"
                 if src_quotes or tgt_quotes:
@@ -121,16 +126,21 @@ class CandidateArcVerifier:
 
         try:
             batch_lists = await asyncio.gather(*[_verify_batch(b) for b in arc_batches])
-            verified_dict: Dict[Tuple[str, str], ArcVerificationItem] = {}
+            verified_typed: Dict[Tuple[str, str, str], ArcVerificationItem] = {}
+            verified_pair: Dict[Tuple[str, str], ArcVerificationItem] = {}
             for items in batch_lists:
                 for item in items:
-                    verified_dict[(item.source.strip(), item.target.strip())] = item
+                    src_k = item.source.strip()
+                    tgt_k = item.target.strip()
+                    if item.type:
+                        verified_typed[(src_k, tgt_k, item.type.strip().lower())] = item
+                    else:
+                        verified_pair[(src_k, tgt_k)] = item
 
             # 严格后置校验：仅当 key 属于 candidate_arcs 且 LLM 显式判定 is_valid=True 时才通过！
             final_arcs: List[Arc] = []
             for a in candidate_arcs:
-                key = (a.source, a.target)
-                v_item = verified_dict.get(key)
+                v_item = verified_typed.get((a.source, a.target, a.type)) or verified_pair.get((a.source, a.target))
                 if v_item is not None and v_item.is_valid:
                     final_arcs.append(
                         Arc(
@@ -138,7 +148,7 @@ class CandidateArcVerifier:
                             source=a.source,
                             target=a.target,
                             type=a.type,
-                            weight=v_item.weight,
+                            weight=min(1.0, max(0.1, float(v_item.weight))),
                             description=v_item.reasoning or a.description,
                         )
                     )

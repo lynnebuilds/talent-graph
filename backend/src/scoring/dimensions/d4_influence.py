@@ -53,16 +53,17 @@ class InfluenceScorer(BaseDimensionScorer):
         if len(cand_ids) < 2:
             return peer_alpha_map, self_alpha_map, adoptions_map
 
-        # 统计率先提出节点被他人后续采纳的次数
-        first_mention_owner: Dict[str, tuple[str, float]] = {}
+        # 统计率先提出节点被他人后续采纳的次数（使用 (timestamp_seconds, utterance_index) 兼容零时间戳文本）
+        first_mention_owner: Dict[str, tuple[str, tuple[float, int]]] = {}
         for cid in cand_ids:
             cg = context.get_candidate_graph(cid)
             if not cg:
                 continue
             for m in cg.node_mentions:
+                order_key = (m.timestamp_seconds, m.utterance_index)
                 cur = first_mention_owner.get(m.node_id)
-                if cur is None or m.timestamp_seconds < cur[1]:
-                    first_mention_owner[m.node_id] = (cid, m.timestamp_seconds)
+                if cur is None or order_key < cur[1]:
+                    first_mention_owner[m.node_id] = (cid, order_key)
 
         for cid in cand_ids:
             cg = context.get_candidate_graph(cid)
@@ -70,7 +71,7 @@ class InfluenceScorer(BaseDimensionScorer):
                 continue
             for m in cg.node_mentions:
                 owner_info = first_mention_owner.get(m.node_id)
-                if owner_info and owner_info[0] != cid and m.timestamp_seconds > owner_info[1]:
+                if owner_info and owner_info[0] != cid and (m.timestamp_seconds, m.utterance_index) > owner_info[1]:
                     adoptions_map[owner_info[0]] += 1
 
         events = self._collect_chronological_events(context)
@@ -131,8 +132,8 @@ class InfluenceScorer(BaseDimensionScorer):
         mu = np.full(k_spk, 0.25, dtype=np.float64)
         A = np.full((k_spk, k_spk), 0.20, dtype=np.float64)
 
-        # 5 步向量化 EM (Minorize-Maximize) 迭代，保证非负单调收敛
-        for _ in range(5):
+        # 最多 15 步向量化 EM 迭代（带早停，纯内存 < 1ms），保证参数充分收敛
+        for _ in range(15):
             # pair_alpha[i, j] = A[ev_spk[i], ev_spk[j]]
             pair_alpha = A[ev_spk[:, np.newaxis], ev_spk[np.newaxis, :]]
             contrib = pair_alpha * G_kernel  # (M, M), i -> j 对事件 j 的激发贡献
@@ -146,7 +147,11 @@ class InfluenceScorer(BaseDimensionScorer):
             # M-step 更新 mu 与激发矩阵 A
             mu = np.maximum(0.05, (spk_one_hot.T @ p_bg) / t_horizon)
             num_A = spk_one_hot.T @ P @ spk_one_hot  # (K, K)
-            A = num_A / denom_per_sender[:, np.newaxis]
+            new_A = num_A / denom_per_sender[:, np.newaxis]
+            if float(np.max(np.abs(new_A - A))) < 1e-4:
+                A = new_A
+                break
+            A = new_A
 
         for idx, cid in enumerate(cand_ids):
             self_alpha_map[cid] = float(A[idx, idx])
@@ -155,14 +160,28 @@ class InfluenceScorer(BaseDimensionScorer):
 
         return peer_alpha_map, self_alpha_map, adoptions_map
 
+    @staticmethod
+    def _minmax_unit(values: Dict[str, float]) -> Dict[str, float]:
+        """对齐 V5 s4_influence: 将自激/互激参数各自独立 MinMax 归一化到 [0.0, 1.0]"""
+        if not values:
+            return {}
+        min_v = min(values.values())
+        max_v = max(values.values())
+        if max_v <= min_v:
+            return {k: (0.5 if v > 0 else 0.0) for k, v in values.items()}
+        span = max_v - min_v
+        return {k: (v - min_v) / span for k, v in values.items()}
+
     def evaluate_all(self, context: ScoringContext) -> Dict[str, DimensionScore]:
         peer_alpha_map, self_alpha_map, adoptions_map = self._fit_multivariate_hawkes(context)
+        norm_peer_map = self._minmax_unit(peer_alpha_map)
+        norm_self_map = self._minmax_unit(self_alpha_map)
         candidate_ids = context.candidate_ids
         raw_results: Dict[str, tuple[float, Dict[str, Any], List[str]]] = {}
 
         for spk_id in candidate_ids:
             raw_results[spk_id] = self._score_speaker(
-                spk_id, context, peer_alpha_map, self_alpha_map, adoptions_map
+                spk_id, context, peer_alpha_map, self_alpha_map, norm_peer_map, norm_self_map, adoptions_map
             )
 
         all_raw_vals = [r[0] for r in raw_results.values()]
@@ -185,6 +204,8 @@ class InfluenceScorer(BaseDimensionScorer):
         context: ScoringContext,
         peer_alpha_map: Dict[str, float],
         self_alpha_map: Dict[str, float],
+        norm_peer_map: Dict[str, float],
+        norm_self_map: Dict[str, float],
         adoptions_map: Dict[str, int],
     ) -> tuple[float, Dict[str, Any], List[str]]:
         speaker = context.get_speaker(speaker_id)
@@ -193,14 +214,16 @@ class InfluenceScorer(BaseDimensionScorer):
 
         peer_alpha = peer_alpha_map.get(speaker_id, 0.0)
         self_alpha = self_alpha_map.get(speaker_id, 0.0)
+        norm_peer = norm_peer_map.get(speaker_id, 0.0)
+        norm_self = norm_self_map.get(speaker_id, 0.0)
         node_adoptions = adoptions_map.get(speaker_id, 0)
 
         in_interactions = [e for e in context.interaction_network.edges if e.target == speaker_id]
         support_in = sum(1 for e in in_interactions if e.type == "support")
         total_in = len(in_interactions)
 
-        # 主导项为 Hawkes 跨成员互激系数 (对应 V5 alpha_obase) + 观点被采纳与回应实证
-        total_raw = peer_alpha * 10.0 + node_adoptions * 2.0 + total_in * 1.5 + support_in * 1.0
+        # 严格对齐 V5 50%/50% 公式: MinMax(self_alpha) + MinMax(peer_alpha) ∈ [0.0, 2.0]（消除节点采纳/互动双重计数）
+        total_raw = norm_self + norm_peer
 
         key_points = []
         if peer_alpha > 0.15:
@@ -215,6 +238,8 @@ class InfluenceScorer(BaseDimensionScorer):
         metrics = {
             "hawkes_peer_excitation": round(peer_alpha, 4),
             "hawkes_self_excitation": round(self_alpha, 4),
+            "norm_peer_excitation": round(norm_peer, 4),
+            "norm_self_excitation": round(norm_self, 4),
             "subsequent_node_adoptions": node_adoptions,
             "total_responses_received": total_in,
             "support_received": support_in,
@@ -227,4 +252,6 @@ class InfluenceScorer(BaseDimensionScorer):
         context: ScoringContext,
     ) -> tuple[float, Dict[str, Any], List[str]]:
         peer_map, self_map, adopt_map = self._fit_multivariate_hawkes(context)
-        return self._score_speaker(speaker_id, context, peer_map, self_map, adopt_map)
+        norm_peer_map = self._minmax_unit(peer_map)
+        norm_self_map = self._minmax_unit(self_map)
+        return self._score_speaker(speaker_id, context, peer_map, self_map, norm_peer_map, norm_self_map, adopt_map)

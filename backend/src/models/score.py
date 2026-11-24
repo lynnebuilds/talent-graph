@@ -92,16 +92,36 @@ class ScoreMatrix(BaseModel):
                 self.dimension_max_scores[dim_id] = max(scores)
                 self.dimension_min_scores[dim_id] = min(scores)
 
-                # 计算单项排名 (降序，同分并列)
-                sorted_spk = sorted(self.participants.keys(), key=lambda s: self.participants[s].get_score(dim_id), reverse=True)
-                for rank_idx, spk in enumerate(sorted_spk, 1):
+                # 计算单项排名 (降序，标准竞赛同分并列 1, 1, 3...)
+                sorted_spk = sorted(
+                    self.participants.keys(),
+                    key=lambda s: self.participants[s].get_score(dim_id),
+                    reverse=True,
+                )
+                prev_score = None
+                curr_rank = 1
+                for idx, spk in enumerate(sorted_spk, 1):
+                    sc = self.participants[spk].get_score(dim_id)
+                    if prev_score is None or sc != prev_score:
+                        curr_rank = idx
+                        prev_score = sc
                     if dim_id in self.participants[spk].dimension_scores:
-                        self.participants[spk].dimension_scores[dim_id].rank = rank_idx
+                        self.participants[spk].dimension_scores[dim_id].rank = curr_rank
 
-        # 计算综合总分排名
+        # 计算综合总分排名 (降序，标准竞赛同分并列 1, 1, 3...)
         total_scores = [p.total_score for p in self.participants.values()]
         if total_scores:
             self.team_average_total_score = round(sum(total_scores) / len(total_scores), 1)
-            sorted_total = sorted(self.participants.keys(), key=lambda s: self.participants[s].total_score, reverse=True)
-            for rank_idx, spk in enumerate(sorted_total, 1):
-                self.participants[spk].overall_rank = rank_idx
+            sorted_total = sorted(
+                self.participants.keys(),
+                key=lambda s: self.participants[s].total_score,
+                reverse=True,
+            )
+            prev_total = None
+            curr_total_rank = 1
+            for idx, spk in enumerate(sorted_total, 1):
+                sc = self.participants[spk].total_score
+                if prev_total is None or sc != prev_total:
+                    curr_total_rank = idx
+                    prev_total = sc
+                self.participants[spk].overall_rank = curr_total_rank

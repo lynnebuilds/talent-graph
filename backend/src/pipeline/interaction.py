@@ -9,6 +9,7 @@ Supports concurrent sliding-window extraction for ultra-long transcripts (>16,00
 """
 
 import asyncio
+import re
 from typing import Dict, List, Optional, Set, Tuple
 
 from pydantic import BaseModel, Field
@@ -111,10 +112,35 @@ class InteractionExtractor:
                 temperature=0.1,
             )
 
+        def _resolve_speaker_id(raw: str) -> str:
+            s = (raw or "").strip()
+            if s in candidate_ids:
+                return s
+            m = re.search(r"(\d+)", s)
+            if m:
+                cand = f"speaker_{m.group(1)}"
+                if cand in candidate_ids:
+                    return cand
+            return s
+
+        def _normalize_itype(raw_type: str) -> str:
+            t = (raw_type or "").lower().strip()
+            if t in {"support", "deny", "neutral"}:
+                return t
+            if any(k in t for k in ("deny", "oppose", "reject", "disagree", "refute", "question", "反对", "质疑", "反驳", "不同意")):
+                return "deny"
+            if any(k in t for k in ("support", "agree", "endorse", "approve", "赞同", "同意", "支持", "认可")):
+                return "support"
+            return "neutral"
+
         try:
-            payloads: List[InteractionPayload] = list(
-                await asyncio.gather(*[_extract_window(w, i) for i, w in enumerate(windows)])
+            raw_results = await asyncio.gather(
+                *[_extract_window(w, i) for i, w in enumerate(windows)],
+                return_exceptions=True,
             )
+            payloads: List[InteractionPayload] = [r for r in raw_results if isinstance(r, InteractionPayload)]
+            if not payloads:
+                raise RuntimeError(f"All {len(windows)} interaction windows failed: {raw_results[0]}")
 
             valid_edges: List[InteractionEdge] = []
             seen_edge_keys: Set[Tuple[str, str, str, Optional[int], str]] = set()
@@ -132,16 +158,9 @@ class InteractionExtractor:
                 if not isinstance(raw_interactions, list):
                     raw_interactions = []
                 for item in raw_interactions:
-                    src = item.source.strip()
-                    tgt = item.target.strip()
-                    if not src.startswith("speaker_") and src.isdigit():
-                        src = f"speaker_{src}"
-                    if not tgt.startswith("speaker_") and tgt.isdigit():
-                        tgt = f"speaker_{tgt}"
-
-                    itype = item.type.lower().strip()
-                    if itype not in {"support", "deny", "neutral"}:
-                        itype = "support"
+                    src = _resolve_speaker_id(item.source)
+                    tgt = _resolve_speaker_id(item.target)
+                    itype = _normalize_itype(item.type)
 
                     if src in candidate_ids and tgt in candidate_ids and src != tgt:
                         u_idx = item.utterance_index
@@ -157,17 +176,20 @@ class InteractionExtractor:
                                     ts = u.start_seconds
                                     break
 
-                        dedup_key = (src, tgt, itype, u_idx, (item.evidence or "")[:20])
+                        # 当有明确 utterance_index 时按 (src, tgt, itype, u_idx) 去重，避免滑窗重叠因引文措辞差异重复计数
+                        ev_key = "" if u_idx is not None else (item.evidence or "")[:20]
+                        dedup_key = (src, tgt, itype, u_idx, ev_key)
                         if dedup_key in seen_edge_keys:
                             continue
                         seen_edge_keys.add(dedup_key)
 
+                        clamped_weight = min(2.0, max(0.5, float(item.weight)))
                         valid_edges.append(
                             InteractionEdge(
                                 source=src,
                                 target=tgt,
                                 type=itype,  # type: ignore
-                                weight=item.weight,
+                                weight=clamped_weight,
                                 evidence=item.evidence,
                                 utterance_index=u_idx,
                                 timestamp_seconds=ts,

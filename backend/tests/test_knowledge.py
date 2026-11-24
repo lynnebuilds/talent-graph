@@ -173,3 +173,65 @@ async def test_v5_hierarchy_and_cross_chunk_completion():
     assert all(not (a.type == "causal" and a.target in root_ids) for a in graph.arcs)
     assert any(a.type == "info" for a in graph.arcs)
 
+
+@pytest.mark.asyncio
+async def test_cross_chunk_batches_interleave_c_and_d_and_root_restricted_to_c():
+    """P0-8/P0-9 回归：>60 节点跨块补边批次必须同时包含 c 与 d；is_root 仅限 c 节点；显式 sub_type 合并生效"""
+    from src.knowledge.extractor import CrossChunkArcItem, CrossChunkArcPayload, ExtractedNode
+
+    # 构造 70 个三级节点（35 c + 35 d）+ 2 个 u，验证跨块补边批次不会把 c 和 d 隔离开
+    c_nodes = [
+        ExtractedNode(id=f"c{i}", name=f"背景约束条件编号{i}详述", type="c", level="三级", sub_type="known")
+        for i in range(1, 36)
+    ]
+    d_nodes = [
+        ExtractedNode(
+            id=f"d{i}",
+            name=f"执行管理方案编号{i}详述",
+            type="d",
+            level="三级",
+            is_root=(i == 1),  # 误标 d1 为 root，不应被当作 root_ids
+        )
+        for i in range(1, 36)
+    ]
+    u_nodes = [
+        ExtractedNode(id="u1", name="短期运营效率提升", type="u", level="二级", sub_type=""),
+        ExtractedNode(id="u2", name="长期净利润增长目标", type="u", level="一级", sub_type="final"),
+    ]
+    # 第二个分块补充 u1 的显式 sub_type="instrumental"
+    p1 = GraphExtractionPayload(title="大题本案例", nodes=c_nodes + [u_nodes[0]], arcs=[])
+    p2 = GraphExtractionPayload(
+        title="大题本案例",
+        nodes=d_nodes + [
+            ExtractedNode(id="u1_dup", name="短期运营效率提升", type="u", level="二级", sub_type="instrumental"),
+            u_nodes[1],
+        ],
+        arcs=[{"source": "d2", "target": "d1", "type": "causal"}],  # 指向误标 root 的 d1 不应被过滤
+    )
+
+    seen_prompts: list[str] = []
+
+    async def fake_chat_json(*, prompt: str, response_model, **kwargs):
+        seen_prompts.append(prompt)
+        return CrossChunkArcPayload(arcs=[CrossChunkArcItem(source="c1", target="d1", type="info")])
+
+    mock_llm = MagicMock()
+    mock_llm.chat_json = AsyncMock(side_effect=fake_chat_json)
+    extractor = StandardGraphExtractor(llm_client=mock_llm)
+
+    graph, chunks_map = extractor._merge_extracted_payloads([p1, p2], corpus_id="big", corpus_hash="h")
+    # d 节点不允许成为 is_root，指向 d1 的因果边保留
+    d1 = graph.get_node("d1")
+    assert d1 is not None and not d1.is_root
+    assert any(a.source == "d2" and a.target == "d1" and a.type == "causal" for a in graph.arcs)
+    # 后分块显式 instrumental 应覆盖先分块的默认 final
+    u1 = graph.get_node("u1")
+    assert u1 is not None and u1.sub_type == "instrumental"
+
+    graph = await extractor._complete_cross_chunk_arcs(graph, chunks_map)
+    assert len(seen_prompts) >= 2
+    # 每一个跨块补边批次中都应同时包含 c 和 d 节点
+    for p in seen_prompts:
+        assert "(c/" in p and "(d/" in p
+
+

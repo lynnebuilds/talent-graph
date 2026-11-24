@@ -30,11 +30,11 @@ class CreativityScorer(BaseDimensionScorer):
         if not cand_graph:
             return 0.0, {"decision_count": 0, "semantic_distance": 0.0, "novel_nodes_count": 0}, []
 
-        std_decisions = [n for n in cand_graph.matched_nodes if n.type == "d"]
+        std_decisions = list({n.id: n for n in cand_graph.matched_nodes if n.type == "d"}.values())
         novel_nodes = cand_graph.novel_nodes
-        decision_count = len(std_decisions) + len([n for n in novel_nodes if n.type == "d"])
+        decision_count = len(std_decisions)
 
-        # 按发言时序还原候选人的节点名称序列（对齐 V5 load_speaker_node_sequence）
+        # 按发言时序还原候选人的标准节点名称序列（对齐 V5 load_speaker_node_sequence，不把无时间戳 novel_nodes 塞入尾端拉高距离）
         seq_names: List[str] = []
         if cand_graph.node_mentions:
             for m in sorted(cand_graph.node_mentions, key=lambda x: (x.timestamp_seconds, x.utterance_index)):
@@ -43,7 +43,6 @@ class CreativityScorer(BaseDimensionScorer):
                     seq_names.append(nd.name)
         else:
             seq_names = [n.name for n in cand_graph.matched_nodes]
-        seq_names.extend([n.name for n in novel_nodes])
 
         emb = context.embedding_engine or get_embedding_engine()
         semantic_distance = 0.0
@@ -53,9 +52,9 @@ class CreativityScorer(BaseDimensionScorer):
             except Exception:
                 semantic_distance = 0.0
 
-        # 对齐 V5 公式: decision_count * semantic_distance (若仅单点则保留 decision_count)，并叠加 novel_nodes 贡献
+        # 对齐 V5 公式: decision_count * semantic_distance；对标准库外 novel_nodes 仅作单次适度加分（消除三重计数）
         v5_core = (decision_count * semantic_distance) if semantic_distance > 0 else float(decision_count)
-        total_raw = v5_core + len(novel_nodes) * 3.5
+        total_raw = v5_core + len(novel_nodes) * 1.5
 
         key_points = []
         if len(novel_nodes) > 0:
@@ -175,9 +174,23 @@ class AssociationScorer(BaseDimensionScorer):
             return 0.0, {"info_associations": 0, "solution_associations": 0, "remote_connections_ge_3": 0}, []
 
         m_ids = cand_graph.matched_node_ids
-        info_hits = sum(1 for (s, c1, c2) in info_triplets if s in m_ids and c1 in m_ids and c2 in m_ids)
-        sol_hits = sum(1 for (t, d1, d2) in sol_triplets if t in m_ids and d1 in m_ids and d2 in m_ids)
+        # 对齐 V5 s3_2_association: 逐发言段检测两个发散叶子节点 (c1, c2) / (d1, d2) 共现（不要求枢轴节点同时被提及）
+        utt_node_sets: List[Set[str]] = []
+        if cand_graph.node_mentions:
+            by_utt: Dict[int, Set[str]] = {}
+            for m in cand_graph.node_mentions:
+                by_utt.setdefault(m.utterance_index, set()).add(m.node_id)
+            utt_node_sets = list(by_utt.values())
+        elif m_ids:
+            utt_node_sets = [m_ids]
 
+        info_hits = 0
+        sol_hits = 0
+        for u_nodes in utt_node_sets:
+            info_hits += sum(1 for (_, c1, c2) in info_triplets if c1 in u_nodes and c2 in u_nodes)
+            sol_hits += sum(1 for (_, d1, d2) in sol_triplets if d1 in u_nodes and d2 in u_nodes)
+
+        # 保留跳数统计作为辅助观测指标，不再参与 raw_score（避免 O(|M|^2) 最短路项淹没 V5 原公式）
         m_list = list(m_ids)
         hop_distances: List[int] = []
         for i in range(len(m_list)):
@@ -189,7 +202,7 @@ class AssociationScorer(BaseDimensionScorer):
 
         remote_ge_3 = sum(1 for d in hop_distances if d >= 3)
         avg_hop = sum(hop_distances) / max(1, len(hop_distances))
-        total_raw = info_hits * 3.0 + sol_hits * 3.0 + sum(hop_distances) * 0.8 + remote_ge_3 * 2.0
+        total_raw = float(info_hits + sol_hits)
 
         key_points = []
         if info_hits > 0 or sol_hits > 0:
@@ -231,16 +244,31 @@ class FeasibilityScorer(BaseDimensionScorer):
         if not cand_graph:
             return 0.0, {"resource_awareness": 0.0, "risk_sensitivity": 0.0, "execution_feasibility": 0.0, "adaptability": 0.0}, []
 
-        decisions = [n for n in cand_graph.matched_nodes if n.type == "d"] + [
-            n for n in cand_graph.novel_nodes if n.type == "d"
-        ]
+        std_decisions = [n for n in cand_graph.matched_nodes if n.type == "d"]
+        decisions = std_decisions + [n for n in cand_graph.novel_nodes if n.type == "d"]
         concepts = [n for n in cand_graph.matched_nodes if n.type == "c"]
 
-        G = cand_graph.to_networkx()
-        grounded_decisions = sum(1 for d in decisions if G.has_node(d.id) and G.in_degree(d.id) > 0)
-        feasibility_ratio = grounded_decisions / max(1, len(decisions)) if decisions else 0.0
+        # 严格对齐 V5 s3_3_feasibility: 未提出任何决策方案时，方案可行性严格为 0
+        if not decisions:
+            return (
+                0.0,
+                {
+                    "resource_awareness": 0.0,
+                    "risk_sensitivity": 0.0,
+                    "execution_feasibility": 0.0,
+                    "adaptability": 0.0,
+                    "grounded_decisions": 0,
+                    "feasibility_ratio": 0.0,
+                },
+                [],
+            )
 
-        # 读取 NodeMatcher 并发阶段同步评出的 V5 四维可行性分 (0~10)，若离线测试未生成则基于图结构闭环映射
+        G = cand_graph.to_networkx()
+        # 仅对具备验证边能力的标准决策节点计算闭环率，避免无边 novel d 节点人为拉低比率
+        grounded_decisions = sum(1 for d in std_decisions if G.has_node(d.id) and G.in_degree(d.id) > 0)
+        feasibility_ratio = grounded_decisions / max(1, len(std_decisions)) if std_decisions else 0.0
+
+        # 读取 NodeMatcher 并发阶段同步评出的 V5 四维可行性分 (0~10)，离线无 LLM 时回退结构代理
         fr = cand_graph.feasibility_ratings or {}
         if fr:
             res_aw = float(fr.get("resource_awareness", 0.0))
@@ -251,11 +279,12 @@ class FeasibilityScorer(BaseDimensionScorer):
         else:
             res_aw = min(10.0, len(concepts) * 2.5)
             risk_s = min(10.0, grounded_decisions * 3.5)
-            exec_f = min(10.0, feasibility_ratio * 8.0 + (2.0 if decisions else 0.0))
+            exec_f = min(10.0, feasibility_ratio * 8.0 + 2.0)
             adapt = min(10.0, len(cand_graph.verified_arcs) * 2.0)
-            v5_four_dim_avg = (res_aw + risk_s + exec_f + adapt) / 4.0 if (decisions or concepts) else 0.0
+            v5_four_dim_avg = (res_aw + risk_s + exec_f + adapt) / 4.0
 
-        total_raw = v5_four_dim_avg * 2.0 + grounded_decisions * 2.0 + feasibility_ratio * 3.0
+        # 严格对齐 V5 公式: 纯四维可行性均分 (0 ~ 10)，移除无界 grounded_decisions 数量膨胀项
+        total_raw = float(v5_four_dim_avg)
 
         key_points = []
         if fr and v5_four_dim_avg >= 6.0:

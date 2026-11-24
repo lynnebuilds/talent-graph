@@ -13,16 +13,16 @@ import networkx as nx
 from src.scoring.base import BaseDimensionScorer, ScoringContext
 
 
-def _count_connected_components(edges: List[Tuple[str, str]]) -> int:
-    """无向连通分量计数（对齐 V5 find_connected_components_from_edges，识别独立推理簇数量）"""
+def _count_connected_components(edges: List[Tuple[int, int]]) -> int:
+    """无向连通分量计数（对齐 V5 find_connected_components_from_edges，按发言段内位置索引识别独立推理簇）"""
     if not edges:
         return 0
-    adj: Dict[str, Set[str]] = {}
+    adj: Dict[int, Set[int]] = {}
     for u, v in edges:
         adj.setdefault(u, set()).add(v)
         adj.setdefault(v, set()).add(u)
 
-    visited: Set[str] = set()
+    visited: Set[int] = set()
     comp = 0
     for node in adj:
         if node in visited:
@@ -40,7 +40,7 @@ def _count_connected_components(edges: List[Tuple[str, str]]) -> int:
 
 
 class LogicalReasoningScorer(BaseDimensionScorer):
-    """1_1 逻辑思维能力评分器 (还原 V5 概念↔事实 演绎/归纳/溯因三模式连通簇算法)"""
+    """1_1 逻辑思维能力评分器 (严格对齐 V5: 按发言段位置图计算演绎/归纳/溯因三模式连通簇)"""
 
     SCORER_ID = "1_1"
     SCORER_NAME = "思维能力 - 逻辑思维"
@@ -65,58 +65,80 @@ class LogicalReasoningScorer(BaseDimensionScorer):
             concept_ids = {n.id for n in std_graph.nodes if n.type in ("u", "d")}
             fact_ids = {n.id for n in std_graph.nodes if n.type == "c"}
 
-        # 候选人经验证的个人边集合（同时参考标准图谱边用于时序发言段内的隐含推理模式识别）
-        verified_pairs = {(a.source, a.target) for a in cand_graph.verified_arcs}
-        std_pairs = {(a.source, a.target) for a in std_graph.arcs}
-        active_edges = verified_pairs if verified_pairs else (
-            {(u, v) for (u, v) in std_pairs if u in cand_graph.matched_node_ids and v in cand_graph.matched_node_ids}
-        )
+        # 对齐 V5: 仅使用候选人已验证的 causal 边（避免 0 边回退全图导致从 0->1 非单调骤降）
+        active_edges: Set[Tuple[str, str]] = {
+            (a.source, a.target) for a in cand_graph.verified_arcs if a.type == "causal"
+        }
 
-        # 按候选人发言顺序组织的节点序列（对齐 V5 load_speaker_reasoning_data）
+        # 按发言轮次(utterance_index)分组（对齐 V5 逐段落检测，禁止跨轮次拼接假推理边）
+        utterance_seqs: List[List[str]] = []
         if cand_graph.node_mentions:
-            seq = [m.node_id for m in sorted(cand_graph.node_mentions, key=lambda x: (x.utterance_index, x.timestamp_seconds))]
-        else:
-            seq = [n.id for n in cand_graph.matched_nodes]
+            by_utt: Dict[int, List[str]] = {}
+            for m in sorted(cand_graph.node_mentions, key=lambda x: (x.utterance_index, x.timestamp_seconds)):
+                by_utt.setdefault(m.utterance_index, []).append(m.node_id)
+            utterance_seqs = list(by_utt.values())
+        elif cand_graph.matched_nodes:
+            utterance_seqs = [[n.id for n in cand_graph.matched_nodes]]
 
-        ded_edges: List[Tuple[str, str]] = []
-        ind_edges: List[Tuple[str, str]] = []
-        abd_edges: List[Tuple[str, str]] = []
+        deduction_count = 0
+        induction_count = 0
+        abduction_count = 0
 
-        # 1. 基于发言时序的 V5 三大推理模式检测
-        for i in range(len(seq)):
-            u_id = seq[i]
-            for j in range(i + 1, len(seq)):
-                v_id = seq[j]
-                if u_id == v_id:
+        for seq in utterance_seqs:
+            n_seq = len(seq)
+            if n_seq < 2:
+                continue
+
+            # Pattern 1 演绎推理 (V5 双遍法):
+            # Pass 1: C -> F 边，将目标事实位置标记为已由概念推导 (flag[j] = 1)
+            # Pass 2: 仅当前置事实已被概念推导 (flag[i] == 1) 时，才允许串联 F -> F 演绎边
+            ded_edges: List[Tuple[int, int]] = []
+            deduced_flag = [0] * n_seq
+            for i in range(n_seq):
+                u_id = seq[i]
+                if u_id not in concept_ids:
                     continue
-                # Pattern 1 演绎推理: 先提概念 C，后推导事实 F (或事实链 F->F)
-                if (u_id, v_id) in active_edges:
-                    if (u_id in concept_ids and v_id in fact_ids) or (u_id in fact_ids and v_id in fact_ids):
-                        ded_edges.append((u_id, v_id))
-                    # Pattern 3 归纳推理: 先提事实 F，后归纳概念 C (或概念递进 C->C)
-                    elif (u_id in fact_ids and v_id in concept_ids) or (u_id in concept_ids and v_id in concept_ids):
-                        ind_edges.append((u_id, v_id))
-                # Pattern 4 溯因推理: 先提结果事实 v_id (出现在前即 u_id)，后追溯原因 (v_id -> u_id)
-                if (v_id, u_id) in active_edges and u_id in fact_ids:
-                    abd_edges.append((v_id, u_id))
+                for j in range(i + 1, n_seq):
+                    v_id = seq[j]
+                    if u_id != v_id and v_id in fact_ids and (u_id, v_id) in active_edges:
+                        ded_edges.append((i + 1, j + 1))
+                        deduced_flag[j] = 1
+            for i in range(n_seq):
+                u_id = seq[i]
+                if u_id not in fact_ids or deduced_flag[i] != 1:
+                    continue
+                for j in range(i + 1, n_seq):
+                    v_id = seq[j]
+                    if u_id != v_id and v_id in fact_ids and (u_id, v_id) in active_edges:
+                        ded_edges.append((i + 1, j + 1))
+                        deduced_flag[j] = 1
 
-        # 补充已验证决策推导边 (c -> d, d -> u)
-        node_types = {n.id: n.type for n in cand_graph.matched_nodes + cand_graph.novel_nodes}
-        for arc in cand_graph.verified_arcs:
-            st = node_types.get(arc.source, "c")
-            tt = node_types.get(arc.target, "c")
-            pair = (arc.source, arc.target)
-            if (st == "c" and tt == "d") or (st == "d" and tt == "u"):
-                if pair not in ded_edges:
-                    ded_edges.append(pair)
-            elif st == tt and pair not in ind_edges:
-                ind_edges.append(pair)
+            # Pattern 3 归纳推理: 先提事实 F 后归纳概念 C (或 C -> C)
+            ind_edges: List[Tuple[int, int]] = []
+            for i in range(n_seq):
+                u_id = seq[i]
+                for j in range(i + 1, n_seq):
+                    v_id = seq[j]
+                    if u_id != v_id and (u_id, v_id) in active_edges:
+                        if (u_id in fact_ids and v_id in concept_ids) or (u_id in concept_ids and v_id in concept_ids):
+                            ind_edges.append((i + 1, j + 1))
 
-        deduction_count = _count_connected_components(ded_edges)
-        induction_count = _count_connected_components(ind_edges)
-        abduction_count = _count_connected_components(abd_edges)
+            # Pattern 4 溯因推理: 先提结果事实 u_id，后追溯原因 v_id (存在 v_id -> u_id)
+            abd_edges: List[Tuple[int, int]] = []
+            for i in range(n_seq):
+                u_id = seq[i]
+                if u_id not in fact_ids:
+                    continue
+                for j in range(i + 1, n_seq):
+                    v_id = seq[j]
+                    if u_id != v_id and (v_id, u_id) in active_edges:
+                        abd_edges.append((j + 1, i + 1))
 
-        # 多跳深度因果链计数 (路径长度 >= 2 跳，即 >= 3 个节点)
+            deduction_count += _count_connected_components(ded_edges)
+            induction_count += _count_connected_components(ind_edges)
+            abduction_count += _count_connected_components(abd_edges)
+
+        # 多跳深度因果链计数 (保留作观测指标，不干扰 V5 核心公式)
         G = cand_graph.to_networkx()
         chain_count = 0
         for src in G.nodes():
@@ -129,14 +151,8 @@ class LogicalReasoningScorer(BaseDimensionScorer):
                     except Exception:
                         pass
 
-        # 对齐 V5 主公式 (count_deduction + count_induction + count_abduction) 并融合多跳链区分度
-        total_raw = (
-            deduction_count * 1.5
-            + induction_count * 1.5
-            + abduction_count * 1.5
-            + chain_count * 0.8
-            + len(cand_graph.verified_arcs) * 0.3
-        )
+        # 严格对齐 V5 主公式: count_deduction + count_induction + count_abduction
+        total_raw = float(deduction_count + induction_count + abduction_count)
 
         key_points = []
         if deduction_count > 0:
@@ -161,7 +177,7 @@ class LogicalReasoningScorer(BaseDimensionScorer):
 
 
 class AbstractionScorer(BaseDimensionScorer):
-    """1_2 抽象归纳能力评分器 (还原 V5: 同上位概念且在因果图中不直接相连的具体节点对归纳次数)"""
+    """1_2 抽象归纳能力评分器 (严格对齐 V5: 逐发言段统计同上位概念且在因果图中不直接相连的具体节点对)"""
 
     SCORER_ID = "1_2"
     SCORER_NAME = "思维能力 - 抽象归纳"
@@ -177,42 +193,44 @@ class AbstractionScorer(BaseDimensionScorer):
 
         std_graph = context.standard_graph
         causal_undirected: Set[Tuple[str, str]] = set()
+        causal_nodes: Set[str] = set()
         for a in std_graph.arcs:
             if a.type == "causal":
                 causal_undirected.add((a.source, a.target))
                 causal_undirected.add((a.target, a.source))
+                causal_nodes.add(a.source)
+                causal_nodes.add(a.target)
 
-        # 1. V5 核心指标：先后提及两个同属一个上位 parent_concept、彼此不同且无直接因果边的具体节点对
-        matched_nodes = cand_graph.matched_nodes
+        # 按发言轮次分组（对齐 V5 逐段落统计；若无 mention 退化为单段 matched_nodes）
+        utterance_nodes: List[List[Any]] = []
+        if cand_graph.node_mentions:
+            by_utt: Dict[int, List[Any]] = {}
+            for m in sorted(cand_graph.node_mentions, key=lambda x: (x.utterance_index, x.timestamp_seconds)):
+                nd = std_graph.get_node(m.node_id)
+                if nd is not None:
+                    by_utt.setdefault(m.utterance_index, []).append(nd)
+            utterance_nodes = list(by_utt.values())
+        elif cand_graph.matched_nodes:
+            utterance_nodes = [list(cand_graph.matched_nodes)]
+
+        # V5 核心指标：同段内提及两个同属同一上位 parent_concept、属于因果图节点且无直接因果边的不同具体节点对
         v5_abstraction_pairs: List[Tuple[str, str]] = []
-        n_len = len(matched_nodes)
-        for i in range(n_len):
-            ni = matched_nodes[i]
-            ci = ni.parent_concept
-            if not ci or ni.name == ci:
-                continue
-            for j in range(i + 1, n_len):
-                nj = matched_nodes[j]
-                cj = nj.parent_concept
-                if ci != cj or ni.id == nj.id or nj.name == cj:
+        for seg_nodes in utterance_nodes:
+            n_len = len(seg_nodes)
+            for i in range(n_len):
+                ni = seg_nodes[i]
+                ci = ni.parent_concept
+                if not ci or ni.name == ci or ni.id == ci or ni.id not in causal_nodes:
                     continue
-                # 空条件集下的简化 d-分离（无直接因果边）
-                if (ni.id, nj.id) not in causal_undirected:
-                    v5_abstraction_pairs.append((ni.name, nj.name))
+                for j in range(i + 1, n_len):
+                    nj = seg_nodes[j]
+                    cj = nj.parent_concept
+                    if ci != cj or ni.id == nj.id or nj.name == cj or nj.id == cj or nj.id not in causal_nodes:
+                        continue
+                    if (ni.id, nj.id) not in causal_undirected:
+                        v5_abstraction_pairs.append((ni.name, nj.name))
 
-        # 2. 单次发言内跨多个非相邻事实节点的综合归纳（当极简图谱未填 parent_concept 时提供无缝信号）
-        u_map: Dict[int, List[str]] = {}
-        for m in cand_graph.node_mentions:
-            u_map.setdefault(m.utterance_index, []).append(m.node_id)
-
-        co_utterance_pairs = 0
-        for _, nids in u_map.items():
-            uniq = list(dict.fromkeys(nids))
-            for i in range(len(uniq)):
-                for j in range(i + 1, len(uniq)):
-                    if (uniq[i], uniq[j]) not in causal_undirected:
-                        co_utterance_pairs += 1
-
+        matched_nodes = cand_graph.matched_nodes
         if std_graph.has_explicit_levels:
             concept_nodes = [n for n in matched_nodes if n.level in ("一级", "二级")]
             total_std_concepts = max(1, len(std_graph.concept_node_ids))
@@ -221,9 +239,9 @@ class AbstractionScorer(BaseDimensionScorer):
             total_std_concepts = max(1, len([n for n in std_graph.nodes if n.type == "c"]))
 
         concept_coverage = len(concept_nodes) / total_std_concepts
-        abstraction_count = len(v5_abstraction_pairs) + co_utterance_pairs
-
-        total_raw = len(v5_abstraction_pairs) * 3.0 + co_utterance_pairs * 1.5 + len(concept_nodes) * 2.0
+        abstraction_count = len(v5_abstraction_pairs)
+        # 严格对齐 V5 公式: score = len(v5_abstraction_pairs)
+        total_raw = float(abstraction_count)
 
         key_points = []
         if v5_abstraction_pairs:
@@ -233,8 +251,6 @@ class AbstractionScorer(BaseDimensionScorer):
             )
         if len(concept_nodes) >= 2:
             key_points.append(f"准确把握 {len(concept_nodes)} 项核心抽象概念，概念覆盖率 {concept_coverage:.0%}")
-        elif co_utterance_pairs > 0:
-            key_points.append(f"在单轮发言中完成 {co_utterance_pairs} 次多源独立信息的综合归纳")
 
         metrics = {
             "abstraction_count": abstraction_count,
@@ -246,7 +262,7 @@ class AbstractionScorer(BaseDimensionScorer):
 
 
 class SystematicThinkingScorer(BaseDimensionScorer):
-    """1_3 系统思维能力评分器 (还原 V5 公式: (1 + 一级宏观主题) × 二级抽象概念 × 三级具体事实)"""
+    """1_3 系统思维能力评分器 (严格对齐 V5 公式: (1 + 一级宏观主题) × 二级抽象概念 × 三级具体事实)"""
 
     SCORER_ID = "1_3"
     SCORER_NAME = "思维能力 - 系统思维"
@@ -260,24 +276,24 @@ class SystematicThinkingScorer(BaseDimensionScorer):
         if not cand_graph:
             return 0.0, {"level1_count": 0, "level2_count": 0, "level3_count": 0, "pyramid_product": 0}, []
 
+        # 显式按节点 ID 去重且仅统计标准节点（对齐 V5 node_output_dropdup）
+        uniq_std_nodes = list({n.id: n for n in cand_graph.matched_nodes}.values())
         std_graph = context.standard_graph
         if std_graph.has_explicit_levels:
-            level1 = len([n for n in cand_graph.matched_nodes if n.level == "一级"])
-            level2 = len([n for n in cand_graph.matched_nodes if n.level == "二级"])
-            level3 = len([n for n in cand_graph.matched_nodes if n.level == "三级"]) + len(cand_graph.novel_nodes)
+            level1 = sum(1 for n in uniq_std_nodes if n.level == "一级")
+            level2 = sum(1 for n in uniq_std_nodes if n.level == "二级")
+            level3 = sum(1 for n in uniq_std_nodes if n.level == "三级")
         else:
             # 极简无层级测试夹具回退：按 u(宏观目标) / d(中观举措) / c(微观事实) 统计
-            level1 = len([n for n in cand_graph.matched_nodes if n.type == "u"])
-            level2 = len([n for n in cand_graph.matched_nodes if n.type == "d"]) + len(cand_graph.novel_nodes)
-            level3 = len([n for n in cand_graph.matched_nodes if n.type == "c"])
+            level1 = sum(1 for n in uniq_std_nodes if n.type == "u")
+            level2 = sum(1 for n in uniq_std_nodes if n.type == "d")
+            level3 = sum(1 for n in uniq_std_nodes if n.type == "c")
 
-        # V5 原始公式：(1 + 一级) × 二级 × 三级；辅以节点覆盖与边连通平滑项区分缺层但仍有贡献的候选人
+        # 严格对齐 V5 原始公式：(1 + 一级) × 二级 × 三级（移除奖励极小图的 density 与非 V5 线性覆盖项）
         v5_pyramid = (1 + level1) * level2 * level3
         G = cand_graph.to_networkx()
         density = nx.density(G) if G.number_of_nodes() > 1 else 0.0
-        base_coverage = (level1 * 1.5 + level2 * 1.2 + level3 * 0.8) + len(cand_graph.verified_arcs) * 1.2
-
-        total_raw = float(v5_pyramid) * 2.0 + base_coverage + density * 5.0
+        total_raw = float(v5_pyramid)
 
         key_points = []
         if level1 > 0 and level2 > 0 and level3 > 0:

@@ -108,3 +108,75 @@ async def test_interaction_extractor_heuristic_fallback():
     types = [e.type for e in net.edges]
     assert "support" in types
     assert "deny" in types
+
+
+def test_parser_does_not_create_fake_speakers_and_parses_timestamp_colon_inline():
+    """P0-12 回归：短冒号小标题不建假说话人；支持同时带时间戳与冒号的行内格式及 '1号候选人' 头行"""
+    messy_text = """
+    说话人 1 00:15：我认为要从三个方面展开。
+    第一点：
+    降低获客成本。
+    总结如下：
+    先做试点再推广。
+    2号候选人
+    [00:45] 说话人 2 我同意1号的试点思路。
+    """
+    parser = DiscussionParser(host_speaker_id="auto")
+    transcript = parser.parse_text(messy_text, group_id="messy_group")
+
+    assert set(transcript.speakers.keys()) == {"speaker_1", "speaker_2"}
+    assert "第一点" in transcript.speakers["speaker_1"].full_text()
+    assert "总结如下" in transcript.speakers["speaker_1"].full_text()
+    assert "试点思路" in transcript.speakers["speaker_2"].full_text()
+
+
+@pytest.mark.asyncio
+async def test_interaction_normalizes_aliases_unknown_type_and_overlap_dedup():
+    """P0-11 回归：非标类型不强转 support、权重钳位、中文别名映射、跨窗口同轮次去重"""
+    parser = DiscussionParser(host_speaker_id="speaker_1")
+    transcript = parser.parse_text(SAMPLE_DISCUSSION_TEXT, group_id="test_group_alias")
+
+    mock_llm = MagicMock()
+    mock_payload = InteractionPayload(
+        interactions=[
+            # 中文别名 + 非标反对词 + 超界权重
+            ExtractedInteractionItem(
+                source="候选人 4",
+                target="3号候选人",
+                type="oppose",
+                utterance_index=3,
+                evidence="我不同意3号",
+                weight=9.9,
+            ),
+            # 未知类型应归 neutral 而非 support
+            ExtractedInteractionItem(
+                source="说话人 3",
+                target="2",
+                type="unknown_tag",
+                utterance_index=2,
+                evidence="顺便补充一句",
+                weight=0.1,
+            ),
+            # 同一轮次 (src, tgt, type, u_idx) 不同 evidence 措辞应去重
+            ExtractedInteractionItem(
+                source="speaker_4",
+                target="speaker_3",
+                type="deny",
+                utterance_index=3,
+                evidence="另一窗口截出的不同引文",
+                weight=1.5,
+            ),
+        ]
+    )
+    mock_llm.chat_json = AsyncMock(return_value=mock_payload)
+
+    extractor = InteractionExtractor(llm_client=mock_llm)
+    net = await extractor.extract_interactions(transcript)
+
+    assert len(net.edges) == 2
+    by_pair = {(e.source, e.target): e for e in net.edges}
+    assert by_pair[("speaker_4", "speaker_3")].type == "deny"
+    assert 0.5 <= by_pair[("speaker_4", "speaker_3")].weight <= 2.0
+    assert by_pair[("speaker_3", "speaker_2")].type == "neutral"
+    assert 0.5 <= by_pair[("speaker_3", "speaker_2")].weight <= 2.0
+

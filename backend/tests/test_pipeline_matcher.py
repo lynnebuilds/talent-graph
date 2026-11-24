@@ -164,6 +164,92 @@ async def test_arc_verifier_rejects_unreturned_and_false_arcs(mock_standard_grap
     assert verified[0].source == "c1" and verified[0].target == "d1"
 
 
+@pytest.mark.asyncio
+async def test_node_matcher_dedups_novel_against_all_std_batches_and_aggregates_windows():
+    """P0-10 回归：多批标准节点时 novel_nodes 对全量标准图谱去重；多发言窗口聚合行为指标"""
+    from configs.settings import Settings
+
+    std_nodes = [
+        Node(id=f"c{i}", name=f"标准概念节点_{i}", type="c")
+        for i in range(1, 26)
+    ]
+    std_graph = StandardGraph(corpus_id="multi_batch", title="多批案例", nodes=std_nodes, arcs=[])
+    # 构造 2 个发言窗口 (>7500 字)
+    long_u1 = Utterance(index=0, speaker_id="speaker_2", speaker_name="候选人 2", text="讨论前期内容。" * 1200, start_seconds=10.0)
+    long_u2 = Utterance(index=1, speaker_id="speaker_2", speaker_name="候选人 2", text="讨论后期提醒时间只剩五分钟。" * 1200, start_seconds=300.0)
+    spk = Speaker(speaker_id="speaker_2", display_name="候选人 2", utterances=[long_u1, long_u2], is_host=False)
+
+    mock_llm = MagicMock(spec=LLMClient)
+    # 2 windows × 2 batches (batch_size=20) = 4 calls
+    # Window 0 Batch 0 returns a false novel node that actually exists in Batch 1 ("标准概念节点_25")
+    w0_b0 = NodeMatchPayload(
+        matched_nodes=[MatchedNodeItem(node_id="c1", utterance_index=0, quote="前期")],
+        novel_nodes=[
+            NovelNodeItem(name="标准概念节点_25", type="c", description="其实在第二批里"),
+            NovelNodeItem(name="真正独创的生态合作机制", type="d", description="真实创新"),
+        ],
+        openness_counts={"listening": 1, "supporting": 1, "analysis": 0, "pushing": 0},
+        timing_control_count=1,
+        feasibility_scores={"resource_awareness": 6.0, "risk_sensitivity": 6.0, "execution_feasibility": 6.0, "adaptability": 6.0},
+    )
+    w0_b1 = NodeMatchPayload(matched_nodes=[MatchedNodeItem(node_id="c25", utterance_index=0, quote="前期")])
+    w1_b0 = NodeMatchPayload(
+        matched_nodes=[],
+        novel_nodes=[],
+        openness_counts={"listening": 0, "supporting": 2, "analysis": 1, "pushing": 1},
+        timing_control_count=2,
+        feasibility_scores={"resource_awareness": 8.0, "risk_sensitivity": 8.0, "execution_feasibility": 8.0, "adaptability": 8.0},
+    )
+    w1_b1 = NodeMatchPayload(matched_nodes=[])
+    mock_llm.chat_json = AsyncMock(side_effect=[w0_b0, w0_b1, w1_b0, w1_b1])
+
+    matcher = CandidateNodeMatcher(llm_client=mock_llm, settings=Settings(node_match_batch_size=20))
+    cg = await matcher.match_nodes_for_speaker(spk, std_graph)
+
+    # 虚假创新点 "标准概念节点_25" 必须被去重剔除，仅保留真正创新点
+    assert [n.name for n in cg.novel_nodes] == ["真正独创的生态合作机制"]
+    # 多窗口行为指标应聚合而非只取窗口 0
+    assert cg.timing_control_count == 3
+    assert cg.openness_counts["supporting"] == 3
+    assert cg.openness_counts["pushing"] == 1
+    assert cg.feasibility_ratings["resource_awareness"] == pytest.approx(7.0)
+
+
+@pytest.mark.asyncio
+async def test_arc_verifier_preserves_parallel_edge_types(mock_speakers):
+    """P0-13 回归：同两点间不同 type 的平行边（如 info 与 causal）互不覆盖"""
+    std_graph = StandardGraph(
+        corpus_id="par",
+        title="平行边测试",
+        nodes=[
+            Node(id="c1", name="成本上升", type="c"),
+            Node(id="d1", name="优化供应链", type="d"),
+        ],
+        arcs=[
+            Arc(source="c1", target="d1", type="info"),
+            Arc(source="c1", target="d1", type="causal"),
+        ],
+    )
+    cg = CandidateGraph(
+        speaker_id="speaker_2",
+        matched_nodes=list(std_graph.nodes),
+    )
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat_json = AsyncMock(
+        return_value=ArcVerificationPayload(
+            verified_arcs=[
+                ArcVerificationItem(source="c1", target="d1", type="info", is_valid=True),
+                ArcVerificationItem(source="c1", target="d1", type="causal", is_valid=False),
+            ]
+        )
+    )
+    verifier = CandidateArcVerifier(llm_client=mock_llm)
+    verified = await verifier.verify_arcs_for_speaker(mock_speakers[0], cg, std_graph)
+    assert len(verified) == 1
+    assert verified[0].type == "info"
+
+
+
 
 @pytest.mark.asyncio
 async def test_pipeline_runner_end_to_end(mock_standard_graph, tmp_path):

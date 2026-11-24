@@ -39,9 +39,10 @@ configs / models  ←  core  ←  knowledge / pipeline / scoring / reporting  �
 ## 2. Non-Negotiable Guardrails
 
 1. **Pure-Math, In-Memory Scoring (`backend/src/scoring/`)**:
-   - Zero LLM calls, zero disk I/O, zero matplotlib/image rendering inside scorers.
+   - Zero LLM calls, zero disk I/O, zero matplotlib/image rendering inside scorers (and no live cloud embedding calls in `2_2`).
    - All 16 dimensions for 12 candidates must run in **< 50ms** (baseline ~2.5ms).
-   - Normalized dimension scores stay in **`60.0 ~ 95.0`** (`normalize_to_standard_score`) unless explicitly changed by spec.
+   - Normalized dimension scores stay in **`60.0 ~ 95.0`** (`normalize_to_standard_score`); total score uses **6-category equal mean** (`ScoringEngine.compute_total_score`, giving dimension `4` 1/6 weight and the other 15 sub-dimensions 1/18 each); rankings use standard competition ties (`1, 1, 3...`).
+   - Core V5 parity invariants are locked in `backend/tests/test_v5_parity.py` (negative `deny` edges never boost `5_1`/`5_2`/`5_3`; `5_2` is a signed lightweight mediation score; `4` weights sender-indexed `self` + `peer` 50%/50%; `3_3` enforces 0-decision = 0). Legacy `v5_speed` is retired once this suite passes.
 2. **Pure-CPU Architecture**:
    - Never introduce PyTorch, CUDA, Transformers, or ModelScope. Embeddings run via pure-CPU ONNX or cloud API (`EmbeddingEngine`).
 3. **Unified LLM Governance**:

@@ -26,7 +26,7 @@ logger = get_logger("node_matcher")
 
 class MatchedNodeItem(BaseModel):
     node_id: str = Field(..., description="命中的标准节点ID，如 c1, d2, u1")
-    utterance_index: int = Field(default=0, description="对应命中的发言段序号 [idx]")
+    utterance_index: Optional[int] = Field(default=None, description="对应命中的发言段序号 [idx]")
     quote: str = Field(default="", description="发言中支持该命中的简短原话片段(<=30字)")
     confidence: float = Field(default=0.9, description="匹配置信度(0.0~1.0)")
 
@@ -131,12 +131,13 @@ class CandidateNodeMatcher:
         default_ts = speaker.utterances[0].start_seconds
 
         async def _match_one_pair(w_idx: int, b_idx: int, speech_txt: str, n_batch: List[Node]) -> NodeMatchPayload:
-            is_primary = (w_idx == 0 and b_idx == 0)
+            # 每个发言窗口的首批节点均抽取创新观点与行为特征，避免长讨论后续窗口被截断盲视
+            is_window_primary = b_idx == 0
             checklist = self._format_nodes_checklist(n_batch)
-            if is_primary:
+            if is_window_primary:
                 prompt = (
                     f"【待评估候选人】：{speaker.display_name} ({speaker.speaker_id})\n\n"
-                    f"【标准题库参考节点清单】：\n{checklist}\n\n"
+                    f"【标准题库参考节点清单（片段 {w_idx + 1}/{len(speech_windows)}）】：\n{checklist}\n\n"
                     f"【该候选人的发言记录】：\n\"\"\"\n{speech_txt}\n\"\"\"\n\n"
                     f"请输出命中的 matched_nodes、创新观点 novel_nodes，以及 feasibility_scores、openness_counts、timing_control_count。"
                 )
@@ -163,39 +164,52 @@ class CandidateNodeMatcher:
                 for w_idx, s_txt in enumerate(speech_windows)
                 for b_idx, n_batch in enumerate(node_batches)
             ]
-            payloads: List[NodeMatchPayload] = list(await asyncio.gather(*tasks))
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            payloads: List[NodeMatchPayload] = [r for r in raw_results if isinstance(r, NodeMatchPayload)]
+            if not payloads:
+                raise RuntimeError(f"All node match batches failed: {raw_results[0]}")
 
             matched_node_dict: Dict[str, Node] = {}
             node_mentions: List[NodeMention] = []
             seen_mentions = set()
             novel_nodes: List[Node] = []
             seen_novel_names = set()
-            feasibility_ratings: Dict[str, float] = {}
+            feasibility_accum: Dict[str, List[float]] = {}
             openness_counts: Dict[str, int] = {}
             timing_control_count: Optional[int] = None
 
+            all_std_names = {n.name.strip() for n in all_std_nodes if n.name.strip()}
+            std_name_list = [n.name.strip() for n in all_std_nodes if n.name.strip()]
+            std_vecs = None
+            if std_name_list and self.embedding is not None:
+                try:
+                    std_vecs = self.embedding.embed_texts(std_name_list)
+                except Exception:
+                    std_vecs = None
+
             for payload in payloads:
                 f_scores = getattr(payload, "feasibility_scores", None)
-                if isinstance(f_scores, dict) and not feasibility_ratings:
+                if isinstance(f_scores, dict):
                     for k in ("resource_awareness", "risk_sensitivity", "execution_feasibility", "adaptability"):
                         if k in f_scores:
                             try:
-                                feasibility_ratings[k] = float(max(0.0, min(10.0, float(f_scores[k]))))
+                                val = float(max(0.0, min(10.0, float(f_scores[k]))))
+                                feasibility_accum.setdefault(k, []).append(val)
                             except (TypeError, ValueError):
                                 pass
 
                 o_counts = getattr(payload, "openness_counts", None)
-                if isinstance(o_counts, dict) and not openness_counts:
+                if isinstance(o_counts, dict):
                     for k in ("listening", "supporting", "analysis", "pushing"):
                         if k in o_counts:
                             try:
-                                openness_counts[k] = max(0, int(o_counts[k]))
+                                openness_counts[k] = openness_counts.get(k, 0) + max(0, int(o_counts[k]))
                             except (TypeError, ValueError):
                                 pass
 
                 t_cnt = getattr(payload, "timing_control_count", None)
-                if isinstance(t_cnt, (int, float)) and not isinstance(t_cnt, bool) and timing_control_count is None:
-                    timing_control_count = max(0, int(t_cnt))
+                if isinstance(t_cnt, (int, float)) and not isinstance(t_cnt, bool):
+                    timing_control_count = (timing_control_count or 0) + max(0, int(t_cnt))
 
                 p_matched = getattr(payload, "matched_nodes", None)
                 if not isinstance(p_matched, list):
@@ -205,14 +219,24 @@ class CandidateNodeMatcher:
                     std_node = standard_graph.get_node(nid)
                     if std_node:
                         matched_node_dict[nid] = std_node
-                        m_key = (nid, item.utterance_index)
+                        u_idx = item.utterance_index
+                        if u_idx is None or u_idx not in u_ts_map:
+                            q_probe = (item.quote or "").strip()[:12]
+                            resolved_idx = speaker.utterances[0].index
+                            if q_probe:
+                                for u in speaker.utterances:
+                                    if q_probe in u.text:
+                                        resolved_idx = u.index
+                                        break
+                            u_idx = resolved_idx
+                        m_key = (nid, u_idx)
                         if m_key not in seen_mentions:
                             seen_mentions.add(m_key)
-                            ts = u_ts_map.get(item.utterance_index, default_ts)
+                            ts = u_ts_map.get(u_idx, default_ts)
                             node_mentions.append(
                                 NodeMention(
                                     node_id=nid,
-                                    utterance_index=item.utterance_index,
+                                    utterance_index=u_idx,
                                     timestamp_seconds=ts,
                                     quote=item.quote,
                                     confidence=min(1.0, max(0.0, item.confidence)),
@@ -224,8 +248,17 @@ class CandidateNodeMatcher:
                     p_novel = []
                 for nov in p_novel:
                     clean_nov = nov.name.strip()
-                    if not clean_nov or clean_nov in seen_novel_names:
+                    if not clean_nov or clean_nov in seen_novel_names or clean_nov in all_std_names:
                         continue
+                    # 对全量标准节点做向量相似度去重，防止多批次匹配时把后续批次标准节点误报为创新点
+                    if std_vecs is not None and self.embedding is not None:
+                        try:
+                            nov_vec = self.embedding.embed_text(clean_nov)
+                            sims = self.embedding.compute_similarity(nov_vec, std_vecs)
+                            if len(sims) > 0 and float(sims.max()) >= 0.85:
+                                continue
+                        except Exception:
+                            pass
                     seen_novel_names.add(clean_nov)
                     nov_type = nov.type.lower()
                     if nov_type not in {"c", "d", "u"}:
@@ -240,6 +273,9 @@ class CandidateNodeMatcher:
                         )
                     )
 
+            feasibility_ratings: Dict[str, float] = {
+                k: round(sum(vals) / len(vals), 3) for k, vals in feasibility_accum.items() if vals
+            }
             node_mentions.sort(key=lambda m: (m.timestamp_seconds, m.utterance_index))
 
             cand_graph = CandidateGraph(

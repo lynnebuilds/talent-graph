@@ -16,7 +16,8 @@ from src.models.score import DimensionScore
 from src.scoring.base import BaseDimensionScorer, ScoringContext, normalize_to_standard_score
 
 _TIMING_REGEX = re.compile(
-    r"(\d+\s*分钟|还有.{0,4}时间|注意.{0,3}时间|控制.{0,3}时间|把控.{0,3}时间|时间有限|抓紧时间|"
+    r"((?:还剩|剩余|还有|给.{0,3}|控制在|用时|时间.{0,3}|最后)\s*\d+\s*分钟|"
+    r"还有.{0,4}时间|注意.{0,3}时间|控制.{0,3}时间|把控.{0,3}时间|时间有限|抓紧时间|"
     r"进入下一|下一阶段|先讨论.{1,8}再|总结一下|梳理一下框架|按顺序发言)"
 )
 
@@ -82,8 +83,8 @@ class FocusScorer(BaseDimensionScorer):
             else 0.0
         )
 
-        # 对齐 V5: 距主题平均距离越小(mean_sim越高)，聚焦度越高
-        total_raw = mean_sim * 10.0 + matched_ratio * 5.0
+        # 严格对齐 V5: 纯粹以距主题的平均余弦贴合度 mean_sim = 1 - mean_dist 计分（移除 matched_ratio 干扰）
+        total_raw = float(mean_sim)
 
         key_points = []
         if mean_sim >= 0.45:
@@ -134,9 +135,8 @@ class TimingControlScorer(BaseDimensionScorer):
         phases_covered = sum(1 for p in (phase1, phase2, phase3) if p > 0)
 
         avg_turn_sec = spk_duration / max(1, turns)
-        turn_quality = 1.3 if 15.0 <= avg_turn_sec <= 100.0 else (0.6 if avg_turn_sec > 180.0 else 1.0)
-
-        total_raw = timing_count * 4.0 + phases_covered * 2.5 + min(8, turns) * 0.6 * turn_quality
+        # 对齐 V5: 显式控时/议程推进次数占绝对主导，阶段覆盖仅作轻微防同分平滑（0 控时绝不反超 >=1 控时者）
+        total_raw = timing_count * 10.0 + phases_covered * 0.5
 
         key_points = []
         if timing_count > 0:
@@ -275,8 +275,8 @@ class ConvergenceScorer(BaseDimensionScorer):
             if e.source == speaker_id and e.type == "support" and e.timestamp_seconds >= cutoff_time
         )
 
-        # 以 V5 向量收敛推进量 total_delta 为主导，辅以冲刺期决策收敛动作
-        total_raw = total_delta * 8.0 + late_mentions * 1.5 + late_supports * 1.5
+        # 严格对齐 V5: 纯向量收敛推进量 total_delta（移除后半程发言量 1.5x 淹没项，保留 late_* 作观测指标）
+        total_raw = float(total_delta)
 
         key_points = []
         if total_delta > 0.05:

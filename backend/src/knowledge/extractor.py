@@ -89,7 +89,7 @@ EXTRACTION_SYSTEM_PROMPT = """你是一名精通决策影响图（Influence Diag
 【三、有向边类型 (arcs)】
 只抽取本段文本中有明确语义或逻辑依据的边：
 - "info": 信息节点支撑决策方案 (c -> d)；
-- "causal": 因果作用关系 (c -> c, d -> c, d -> d, d -> u, u_instrumental -> u_final)，注意根因节点不可作为因果边终点；
+- "causal": 因果作用关系 (c -> c, c -> u, d -> c, d -> d, d -> u, u_instrumental -> u_final)，注意根因信息节点不可作为因果边终点；
 - "update": 已知证据信息更新对未知信息的判断 (known c -> unknown c)。
 
 【四、精简输出示范】
@@ -110,7 +110,7 @@ EXTRACTION_SYSTEM_PROMPT = """你是一名精通决策影响图（Influence Diag
 CROSS_CHUNK_ARC_SYSTEM_PROMPT = """你是一名决策影响图全局拓扑专家。
 由于长文档被分块抽取，部分处于不同段落的节点尚未建立连接。请从给定的全局节点清单中，补充跨段落明显成立的核心有向边：
 1. info: 背景/痛点信息支撑某项决策措施 (c -> d)
-2. causal: 决策达成手段目标、手段目标支撑最终目标、或背景引发连锁后果 (d -> u, u_instrumental -> u_final, d -> c, c -> c)
+2. causal: 决策达成手段目标、手段目标支撑最终目标、或背景引发连锁后果 (d -> u, u_instrumental -> u_final, d -> c, d -> d, c -> c, c -> u)
 3. update: 已知事实信息影响对未知推断信息的判断 (known c -> unknown c)
 严格要求：只输出高置信度、逻辑严密的边（每批控制在 30 条以内），严禁连接无直接逻辑关联的节点对，只使用给定的节点 ID。"""
 
@@ -260,7 +260,9 @@ class StandardGraphExtractor:
                     n_type = n.id[0].lower() if n.id and n.id[0].lower() in {"c", "d", "u"} else "c"
 
                 n_level = self._normalize_level(n.level)
+                raw_sub_provided = bool((n.sub_type or "").strip())
                 n_sub = self._normalize_sub_type(n_type, n.sub_type)
+                n_is_root = bool(n.is_root) and n_type == "c"
 
                 existing_group = unified_nodes_by_type[n_type]
                 matched_idx = -1
@@ -280,11 +282,11 @@ class StandardGraphExtractor:
                         node_vec = None
 
                 if matched_idx == -1 and embedding_engine is not None and node_vec is not None and existing_group:
-                    exist_vecs = [e["_vec"] for e in existing_group if e.get("_vec") is not None]
-                    if len(exist_vecs) == len(existing_group):
-                        sims = embedding_engine.compute_similarity(node_vec, exist_vecs)
+                    indexed_vecs = [(idx, e["_vec"]) for idx, e in enumerate(existing_group) if e.get("_vec") is not None]
+                    if indexed_vecs:
+                        sims = embedding_engine.compute_similarity(node_vec, [v for _, v in indexed_vecs])
                         if len(sims) > 0 and float(sims.max()) >= sim_threshold:
-                            matched_idx = int(sims.argmax())
+                            matched_idx = indexed_vecs[int(sims.argmax())][0]
 
                 if matched_idx != -1:
                     target_entry = existing_group[matched_idx]
@@ -295,10 +297,14 @@ class StandardGraphExtractor:
                     target_entry["keywords"] = list(dict.fromkeys(target_entry["keywords"] + n.keywords))[:5]
                     if level_priority.get(n_level, 1) > level_priority.get(target_entry["level"], 1):
                         target_entry["level"] = n_level
-                    if n.is_root:
+                    if n_is_root:
                         target_entry["is_root"] = True
-                    if n_sub and not target_entry.get("sub_type"):
+                    if raw_sub_provided and (
+                        not target_entry.get("_sub_explicit")
+                        or n_sub in ("unknown", "instrumental")
+                    ):
                         target_entry["sub_type"] = n_sub
+                        target_entry["_sub_explicit"] = True
                     if n.description and n.description not in target_entry["description"]:
                         target_entry["description"] = (
                             f"{target_entry['description']}；{n.description}".strip("；")
@@ -315,7 +321,8 @@ class StandardGraphExtractor:
                         "type": n_type,
                         "level": n_level,
                         "sub_type": n_sub,
-                        "is_root": bool(n.is_root),
+                        "_sub_explicit": raw_sub_provided,
+                        "is_root": n_is_root,
                         "description": n.description,
                         "keywords": list(dict.fromkeys(n.keywords))[:5],
                         "_vec": node_vec,
@@ -431,8 +438,8 @@ class StandardGraphExtractor:
             return graph
 
         valid_ids = graph.node_id_set
-        root_ids = {n.id for n in graph.nodes if n.is_root}
-        existing_pairs = {(a.source, a.target) for a in graph.arcs}
+        root_ids = {n.id for n in graph.nodes if n.is_root and n.type == "c"}
+        existing_triplets: Set[Tuple[str, str, str]] = {(a.source, a.target, str(a.type)) for a in graph.arcs}
 
         # 提取全局骨干节点（所有 u 效用节点 + 一/二级概念节点，上限 25 个）
         backbone_nodes = [
@@ -441,17 +448,20 @@ class StandardGraphExtractor:
         backbone_ids = {n.id for n in backbone_nodes}
         remaining_nodes = [n for n in graph.nodes if n.id not in backbone_ids]
 
-        # 按每组最多 35 个其余节点 + 全局骨干节点构造高内聚批次（上限 6 批）
+        # 按 c/d/u 类型分层交错分批，确保每个批次都同时包含信息(c)与决策(d)节点（修复同类扎堆隔离问题）
         batches: List[List[Node]] = []
         if len(graph.nodes) <= 60:
             batches.append(graph.nodes)
         else:
-            step = max(25, (len(remaining_nodes) + 5) // 6)
-            for i in range(0, len(remaining_nodes), step):
-                sub = backbone_nodes + remaining_nodes[i : i + step]
-                batches.append(sub)
-                if len(batches) >= 6:
-                    break
+            num_batches = min(6, max(2, (len(remaining_nodes) + 34) // 35))
+            rem_buckets: List[List[Node]] = [[] for _ in range(num_batches)]
+            for n_type in ("c", "d", "u"):
+                typed_rem = [n for n in remaining_nodes if n.type == n_type]
+                for idx, node in enumerate(typed_rem):
+                    rem_buckets[idx % num_batches].append(node)
+            for bucket in rem_buckets:
+                if bucket:
+                    batches.append(backbone_nodes + bucket)
 
         async def _run_batch(batch_nodes: List[Node]) -> List[Tuple[str, str, str]]:
             lines = []
@@ -493,9 +503,8 @@ class StandardGraphExtractor:
                     continue
                 if atype == "causal" and tgt in root_ids:
                     continue
-                # 至少有一端跨不同分块时优先补齐（或尚未存在的骨干连接）
-                if (src, tgt) not in existing_pairs:
-                    existing_pairs.add((src, tgt))
+                if (src, tgt, atype) not in existing_triplets:
+                    existing_triplets.add((src, tgt, atype))
                     graph.arcs.append(Arc(source=src, target=tgt, type=atype))  # type: ignore
                     added_count += 1
 

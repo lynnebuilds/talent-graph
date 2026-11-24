@@ -111,18 +111,23 @@ class DiscussionParser:
         if not lines:
             raise ValueError("Transcript text cannot be empty.")
 
-        # 独立头行: "说话人 1 00:15" / "[00:15] 说话人 1" / "候选人2："
+        # 独立头行: "说话人 1 00:15" / "[00:15] 说话人 1" / "候选人2：" / "2号候选人"
         pattern_speaker_header = re.compile(
             r"^(?:\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*)?"
             r"(主持人|考官|说话人\s*\d+|候选人\s*\d+|\d+号(?:候选人)?|发言人\s*\d+|speaker[_\s]*\d+|[^\s：:]{1,12})"
             r"\s*(?:\(?\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\)?)?[：:]?$",
             re.IGNORECASE,
         )
-        # 单行内联格式 (兼容 V5 转写稿): "说话人 1 00:15 各位好，我认为..." 或 "说话人2：我认为..."
+        # 单行内联格式: 支持 "说话人 1 00:15 大家好..." / "说话人 1 00:15：大家好..." / "[00:15] 说话人 1 大家好..." / "说话人2：大家好..."
         pattern_inline_turn = re.compile(
             r"^(?:\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*)?"
             r"(主持人|考官|说话人\s*\d+|候选人\s*\d+|\d+号(?:候选人)?|发言人\s*\d+|speaker[_\s]*\d+)"
-            r"(?:\s+\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+|\s*[：:]\s*)(.+)$",
+            r"(?:\s+\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?)?"
+            r"(?:\s*[：:]\s*|\s+)(.+)$",
+            re.IGNORECASE,
+        )
+        std_tag_re = re.compile(
+            r"^(主持人|考官|说话人\s*\d+|候选人\s*\d+|\d+号(?:候选人)?|发言人\s*\d+|speaker[_\s]*\d+)$",
             re.IGNORECASE,
         )
 
@@ -152,6 +157,20 @@ class DiscussionParser:
                 current_text_buf = []
 
         for line in lines:
+            match = pattern_speaker_header.match(line)
+            if match:
+                time_prefix, spk_raw, time_suffix = match.groups()
+                is_std_tag = bool(std_tag_re.match(spk_raw.strip()))
+                has_explicit_time = bool(time_prefix or time_suffix)
+                # 仅接受标准发言人标签，或带显式时间戳的具名发言人头行；避免 "第一点：" / "总结如下：" 被误建为假候选人
+                if len(spk_raw) <= 15 and (is_std_tag or has_explicit_time):
+                    flush_current()
+                    spk_id, spk_display = self.normalize_speaker_id(spk_raw, treat_spk1_as_host=explicit_host)
+                    current_speaker_id = spk_id
+                    current_speaker_name = spk_display
+                    current_time_str = time_prefix or time_suffix or current_time_str
+                    continue
+
             inline_match = pattern_inline_turn.match(line)
             if inline_match:
                 t_pre, spk_raw, t_suf, body = inline_match.groups()
@@ -164,29 +183,7 @@ class DiscussionParser:
                     current_text_buf.append(body.strip())
                 continue
 
-            match = pattern_speaker_header.match(line)
-            if match:
-                time_prefix, spk_raw, time_suffix = match.groups()
-                # 若无时间戳且无冒号且并非标准“说话人/候选人”标识，视作普通正文句
-                is_std_tag = bool(
-                    re.match(
-                        r"^(主持人|考官|说话人\s*\d+|候选人\s*\d+|\d+号|发言人\s*\d+|speaker[_\s]*\d+)$",
-                        spk_raw.strip(),
-                        re.IGNORECASE,
-                    )
-                )
-                has_time_or_colon = bool(time_prefix or time_suffix or line.endswith(("：", ":")))
-                if len(spk_raw) > 15 or (not is_std_tag and not has_time_or_colon):
-                    current_text_buf.append(line)
-                    continue
-
-                flush_current()
-                spk_id, spk_display = self.normalize_speaker_id(spk_raw, treat_spk1_as_host=explicit_host)
-                current_speaker_id = spk_id
-                current_speaker_name = spk_display
-                current_time_str = time_prefix or time_suffix or current_time_str
-            else:
-                current_text_buf.append(line)
+            current_text_buf.append(line)
 
         flush_current()
 
