@@ -46,15 +46,15 @@ configs / models  ←  core  ←  knowledge / pipeline / scoring / reporting  �
 2. **Pure-CPU Architecture**:
    - Never introduce PyTorch, CUDA, Transformers, or ModelScope. Embeddings run via pure-CPU ONNX or cloud API (`EmbeddingEngine`).
 3. **Unified LLM Governance**:
-   - All LLM calls MUST go through `backend/src/core/llm_client.py` (`LLMClient` with `asyncio.Semaphore`, timeout, exponential backoff retry, and Pydantic structured parsing). Do not scatter raw OpenAI/HTTP clients in business modules.
+   - All LLM calls MUST go through `backend/src/core/llm_client.py` (`LLMClient` with `asyncio.Semaphore`, timeout, exponential backoff retry, multi-relay routing via `RELAY_<NAME>_*`, automatic fallback to official DeepSeek `deepseek-flash`, and Pydantic structured parsing). Do not scatter raw OpenAI/HTTP clients in business modules.
 4. **Frontend-Backend Contract Sync**:
    - `ReportData` (`backend/src/models/report.py`) is the single JSON contract consumed by REST API, `frontend/dist/index.html`, and `frontend/dist/report-print.html`.
    - Any field addition, rename, or removal in `ReportData` MUST update affected frontend HTML files and `docs/DATA_SCHEMA_AND_INTEGRATION.md`.
 5. **Stateless Code / Isolated Data**:
    - All runtime artifacts (corpus cache, `report.json`, graphs, PDFs) MUST be written under `data/` via `Settings` path helpers—never inside `backend/src/`.
 6. **Security & Side-Effect Discipline**:
-   - Never hardcode API keys or credentials (read via `Settings` / `.env`).
-   - Keep `mock_email=True` and `enable_telemetry=False` by default; no external tracking side effects.
+   - Never hardcode API keys or credentials (read via `Settings` / `.env`), and never expose API keys or private relay URLs in `/health` responses or logs.
+   - Keep zero external telemetry, enterprise reporting, or real email-sending side effects in the codebase.
 
 ---
 
@@ -87,10 +87,10 @@ curl -sf http://localhost:8000/health
 
 For non-trivial features, algorithm updates, or refactors (skip full ceremony for 1-line typos/copy fixes):
 
-1. **Clarify First**: Resolve ambiguity, edge cases, fallback behavior, and Out-of-Scope before coding (e.g., `grill-me` / `/grill-me`).
-2. **Spec & Vertical Slices**: Break work into 2–6 small, independently testable vertical slices with concrete acceptance criteria (e.g., `write-a-prd` → `prd-to-plan`). Avoid horizontal slicing.
-3. **TDD Loop**: For core domain logic (scoring formulas, pipeline pruning/parsing, fallback paths, state transitions), follow one **Red → Green → Refactor** cycle per slice (`tdd`). Do not write all implementation first and backfill tests later.
-4. **Verify & Clean-Context Review**: Pass all deterministic checks (`pytest` + `ruff` + `mypy` + `benchmark`), then review `git diff` against both the spec and this `AGENTS.md` from a fresh perspective.
+1. **Clarify First**: Resolve ambiguity, edge cases, fallback behavior, and explicit **Out of Scope** before coding (via `/grill-me` or direct clarification questions).
+2. **Spec & Vertical Slices**: Before writing code, align on a concise spec (or `/plan`) broken into 2–6 small, independently testable **vertical slices** — each listing **Goal + Files + Acceptance Test**. Avoid horizontal slicing.
+3. **TDD Loop**: For core domain logic (scoring formulas, pipeline pruning/parsing, fallback paths, state transitions), follow one **Red → Green → Refactor** cycle per slice. Do not write all implementation first and backfill tests later.
+4. **Verify & Clean-Context Review**: Pass all deterministic checks (`./scripts/check.sh`: `ruff` + `mypy` + `pytest --cov` + `benchmark`), then review `git diff` in a fresh read-only subagent along two axes: **Spec Axis** (AC completeness, edge cases, no scope creep) and **Standards Axis** (architecture boundaries, security/log redaction, resource cleanup).
 5. **Compound Learning**: Whenever an AI mistake or subtle regression occurs, add a regression test or a concise rule here so it cannot recur.
 
 **Stop & Ask Human Before**:

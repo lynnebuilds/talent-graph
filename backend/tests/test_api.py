@@ -129,3 +129,112 @@ def test_assessment_endpoints(client):
     print_resp = client.get(f"/report-print/{task_id}/speaker_2")
     assert print_resp.status_code == 200
 
+
+def test_health_exposes_sanitized_providers_and_submit_supports_per_request_provider(client, monkeypatch):
+    """验证 /health 返回脱敏可用渠道清单，且 /submit 支持按次 llm_provider 覆盖不泄漏密钥"""
+    from unittest.mock import patch
+
+    from configs.settings import Settings
+    from src.api.v1.assessment import AssessmentSubmitRequest
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret-official-999")
+    monkeypatch.setenv("RELAY_ONE_BASE_URL", "https://one.relay.test/v1")
+    monkeypatch.setenv("RELAY_ONE_API_KEY", "sk-secret-relay-888")
+    monkeypatch.setenv("RELAY_ONE_MODEL", "deepseek-chat")
+
+    fresh_settings = Settings(_env_file=None, llm_provider="deepseek")
+    with patch("server.get_settings", return_value=fresh_settings):
+        resp = client.get("/health")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["llm_provider"] == "deepseek"
+    assert payload["llm_model"] == "deepseek-flash"
+    assert "deepseek" in payload["available_llm_providers"]
+    assert "relay_one" in payload["available_llm_providers"]
+    # 严禁暴露任何 API Key 或 URL
+    raw_json = resp.text
+    assert "sk-secret-official-999" not in raw_json
+    assert "sk-secret-relay-888" not in raw_json
+    assert "one.relay.test" not in raw_json
+
+    # 验证请求契约支持可选 llm_provider 覆盖
+    req = AssessmentSubmitRequest(
+        corpus_text="语料",
+        discussion_text="说话人 1 00:01 发言",
+        llm_provider="relay_one",
+    )
+    assert req.llm_provider == "relay_one"
+
+
+@pytest.mark.asyncio
+async def test_run_assessment_task_uses_isolated_provider_without_mutating_global(monkeypatch):
+    """验证 run_assessment_task 按次构造独立 LLMClient 覆盖渠道且不污染全局配置"""
+    from unittest.mock import patch
+
+    from configs.settings import Settings
+    from src.api.v1.assessment import AssessmentSubmitRequest, run_assessment_task
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-official-iso-123")
+    monkeypatch.setenv("RELAY_ONE_BASE_URL", "https://iso.relay.test/v1")
+    monkeypatch.setenv("RELAY_ONE_API_KEY", "sk-relay-iso-456")
+    monkeypatch.setenv("RELAY_ONE_MODEL", "deepseek-chat")
+
+    base_settings = Settings(_env_file=None, llm_provider="deepseek")
+    captured = {}
+
+    class DummyRunner:
+        def __init__(self, settings=None, llm_client=None, **_kwargs):
+            captured["runner_provider"] = llm_client.provider_name
+            captured["runner_model"] = llm_client.default_model
+
+        async def run(self, **_kwargs):
+            return MagicMock(group_id="g_iso")
+
+    class DummyReportGen:
+        def __init__(self, settings=None, llm_client=None, **_kwargs):
+            captured["report_provider"] = llm_client.provider_name
+            captured["report_client"] = llm_client
+
+        async def generate_report(self, **_kwargs):
+            return MagicMock(group_id="g_iso")
+
+    req = AssessmentSubmitRequest(
+        corpus_text="测试语料",
+        discussion_text="说话人 1 00:01 开始讨论",
+        llm_provider="relay_one",
+    )
+
+    with (
+        patch("src.api.v1.assessment.get_settings", return_value=base_settings),
+        patch("src.api.v1.assessment.PipelineRunner", DummyRunner),
+        patch("src.api.v1.assessment.ReportGenerator", DummyReportGen),
+        patch.object(LLMClient, "close", new_callable=AsyncMock) as mock_close,
+    ):
+        await run_assessment_task("task_iso_test", req)
+
+    assert captured["runner_provider"] == "relay_one"
+    assert captured["runner_model"] == "deepseek-chat"
+    assert captured["report_provider"] == "relay_one"
+    mock_close.assert_awaited_once()
+    # 全局设置保持 deepseek 未被篡改
+    assert base_settings.llm_provider == "deepseek"
+
+    # 验证即使 PipelineRunner 初始化抛异常，也会安全关闭连接池并将任务标记为 failed
+    from src.api.v1.assessment import TASK_STORE
+
+    class FailingRunner:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("init boom")
+
+    with (
+        patch("src.api.v1.assessment.get_settings", return_value=base_settings),
+        patch("src.api.v1.assessment.PipelineRunner", FailingRunner),
+        patch.object(LLMClient, "close", new_callable=AsyncMock) as mock_close_fail,
+    ):
+        await run_assessment_task("task_iso_fail", req)
+
+    mock_close_fail.assert_awaited_once()
+    assert TASK_STORE["task_iso_fail"]["status"] == "failed"
+
+
+

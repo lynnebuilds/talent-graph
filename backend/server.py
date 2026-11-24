@@ -5,6 +5,7 @@ Provides REST APIs, WebSocket real-time progress, and static frontend hosting.
 """
 
 import argparse
+import os
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,12 +43,16 @@ app.include_router(api_v1_router, prefix="/api")
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """系统健康检查探针"""
+    """系统健康检查探针（仅返回脱敏后的渠道名称与状态，绝不暴露 API Key 或 URL）"""
+    current_settings = get_settings()
+    active_profile, _ = current_settings.resolve_llm_provider()
     return {
         "status": "healthy",
         "service": "talent_graph",
-        "llm_provider": settings.llm_provider,
-        "embedding_provider": settings.embedding_provider,
+        "llm_provider": active_profile.name,
+        "llm_model": active_profile.model,
+        "available_llm_providers": current_settings.get_available_llm_providers(),
+        "embedding_provider": current_settings.embedding_provider,
     }
 
 
@@ -90,7 +95,17 @@ def main():
     parser.add_argument("--host", default=settings.app_host, help="Host to bind")
     parser.add_argument("--port", type=int, default=settings.app_port, help="Port to listen")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
+    parser.add_argument(
+        "-P",
+        "--provider",
+        default=None,
+        help="Override active LLM provider (e.g. deepseek, relay_a)",
+    )
     args = parser.parse_args()
+
+    if args.provider:
+        os.environ["LLM_PROVIDER"] = args.provider
+        get_settings.cache_clear()
 
     logger.info(f"Starting TalentGraph Server on http://{args.host}:{args.port} (Docs: http://{args.host}:{args.port}/docs)")
     uvicorn.run("server:app", host=args.host, port=args.port, reload=args.reload)

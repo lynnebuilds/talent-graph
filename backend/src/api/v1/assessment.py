@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from configs.settings import get_settings
 from src.api.websocket import get_progress_manager
+from src.core.llm_client import LLMClient
 from src.core.logger import get_logger
 from src.models.report import ReportData
 from src.pipeline.runner import PipelineRunner
@@ -33,6 +34,10 @@ class AssessmentSubmitRequest(BaseModel):
     corpus_id: Optional[str] = Field(default=None, description="题库语料标识")
     title: Optional[str] = Field(default="无领导小组讨论", description="案例标题")
     project_id: Optional[str] = Field(default="default_project", description="所属项目标识")
+    llm_provider: Optional[str] = Field(
+        default=None,
+        description="可选按次覆盖 LLM 渠道 (如 deepseek / relay_a / relay_b / mock)，不影响全局默认配置",
+    )
 
 
 class AssessmentSubmitResponse(BaseModel):
@@ -48,10 +53,11 @@ async def run_assessment_task(
     """异步后台运行完整评测流水线并实时推送进度"""
     settings = get_settings()
     pm = get_progress_manager()
-    runner = PipelineRunner(settings=settings)
-    report_gen = ReportGenerator(settings=settings)
+    task_llm = LLMClient(settings=settings, provider_name=req.llm_provider)
 
     try:
+        runner = PipelineRunner(settings=settings, llm_client=task_llm)
+        report_gen = ReportGenerator(settings=settings, llm_client=task_llm)
         TASK_STORE[task_id] = {"status": "processing", "progress": 5, "stage": "INIT"}
         await pm.broadcast_progress(task_id, 5, "INIT", "正在初始化任务环境...")
 
@@ -90,6 +96,8 @@ async def run_assessment_task(
         logger.error(f"Task {task_id} failed: {exc}", exc_info=True)
         TASK_STORE[task_id] = {"status": "failed", "progress": 0, "stage": "FAILED", "error": str(exc)}
         await pm.broadcast_progress(task_id, 0, "FAILED", f"评测失败: {exc}")
+    finally:
+        await task_llm.close()
 
 
 @router.post("/submit", response_model=AssessmentSubmitResponse)

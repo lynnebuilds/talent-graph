@@ -9,6 +9,7 @@ Provides:
 """
 
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
@@ -26,7 +27,9 @@ if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
 from configs.settings import get_settings  # noqa: E402
-from src.knowledge.cache import get_graph_cache_manager  # noqa: E402
+from src.core.llm_client import LLMClient  # noqa: E402
+from src.knowledge.cache import GraphCacheManager  # noqa: E402
+from src.knowledge.extractor import StandardGraphExtractor  # noqa: E402
 from src.pipeline.runner import PipelineRunner  # noqa: E402
 from src.reporting.generator import ReportGenerator  # noqa: E402
 
@@ -65,6 +68,9 @@ def prepare(
     corpus: Path = typer.Option(..., "--corpus", "-c", help="案例参考答案文本文件路径 (corpus.txt)"),
     title: str = typer.Option("无领导小组讨论案例", "--title", "-t", help="案例题目"),
     force: bool = typer.Option(False, "--force", "-f", help="强制重新提取（忽略现有缓存）"),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-P", help="临时指定 LLM 渠道 (如 deepseek / relay_a / relay_b)"
+    ),
 ):
     """【题库预热】提取标准题库因果影响图谱并预热本地 0 秒缓存"""
     if not corpus.exists():
@@ -72,7 +78,23 @@ def prepare(
         raise typer.Exit(1)
 
     text = corpus.read_text(encoding="utf-8")
-    cache_mgr = get_graph_cache_manager()
+    settings = get_settings()
+
+    async def _run_prepare():
+        llm_client = LLMClient(settings=settings, provider_name=provider)
+        try:
+            cache_mgr = GraphCacheManager(
+                extractor=StandardGraphExtractor(llm_client=llm_client, settings=settings),
+                settings=settings,
+            )
+            return await cache_mgr.get_or_extract(
+                corpus_text=text,
+                corpus_id=corpus.stem,
+                title=title,
+                force_refresh=force,
+            )
+        finally:
+            await llm_client.close()
 
     with Progress(
         SpinnerColumn(),
@@ -80,14 +102,7 @@ def prepare(
         transient=True,
     ) as progress:
         progress.add_task(description="正在构建标准图谱与缓存...", total=None)
-        graph = asyncio.run(
-            cache_mgr.get_or_extract(
-                corpus_text=text,
-                corpus_id=corpus.stem,
-                title=title,
-                force_refresh=force,
-            )
-        )
+        graph = asyncio.run(_run_prepare())
 
     console.print(
         Panel(
@@ -108,6 +123,9 @@ def evaluate(
     group: Path = typer.Option(..., "--group", "-g", help="小组讨论对话转录文本路径 (group_*.txt)"),
     title: str = typer.Option("无领导小组讨论", "--title", "-t", help="讨论场次标题"),
     export_pdf: bool = typer.Option(False, "--export-pdf", help="评估完成后导出每位候选人的 PDF 报告"),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-P", help="临时指定 LLM 渠道 (如 deepseek / relay_a / relay_b)"
+    ),
 ):
     """【一键评测】运行端到端评测流水线，输出 16 维量化画像与综合诊断报告"""
     if not corpus.exists() or not group.exists():
@@ -116,21 +134,29 @@ def evaluate(
 
     start_total = time.perf_counter()
     settings = get_settings()
-    runner = PipelineRunner(settings=settings)
-    report_gen = ReportGenerator(settings=settings)
 
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         transient=True,
     ) as progress:
-        # Step 1: Pipeline
-        progress.add_task(description="[1/3] 正在解析讨论并进行节点与因果边剪枝匹配...", total=None)
-        pipeline_res = asyncio.run(runner.run_files(corpus, group, title=title))
+        task_id = progress.add_task(description="[1/2] 正在解析讨论并进行节点与因果边剪枝匹配...", total=None)
 
-        # Step 2: 评分与诊断
-        progress.add_task(description="[2/3] 正在执行 16 维纯数学图论评分与候选人全维诊断...", total=None)
-        report_data = asyncio.run(report_gen.generate_report(pipeline_res))
+        async def _run_evaluate():
+            llm_client = LLMClient(settings=settings, provider_name=provider)
+            try:
+                runner = PipelineRunner(settings=settings, llm_client=llm_client)
+                report_gen = ReportGenerator(settings=settings, llm_client=llm_client)
+                pipeline_res = await runner.run_files(corpus, group, title=title)
+                progress.update(
+                    task_id,
+                    description="[2/2] 正在执行 16 维纯数学图论评分与候选人全维诊断...",
+                )
+                return await report_gen.generate_report(pipeline_res)
+            finally:
+                await llm_client.close()
+
+        report_data = asyncio.run(_run_evaluate())
 
     total_time = time.perf_counter() - start_total
 
@@ -178,9 +204,18 @@ def start_server(
     host: str = typer.Option("0.0.0.0", "--host", "-h", help="监听地址"),
     port: int = typer.Option(8000, "--port", "-p", help="监听端口"),
     reload: bool = typer.Option(False, "--reload", "-r", help="热重载"),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-P", help="启动时临时指定默认 LLM 渠道 (如 deepseek / relay_a / relay_b)"
+    ),
 ):
     """【启动服务】启动 FastAPI 后端服务与可视化前端页面"""
     import uvicorn
+
+    if provider:
+        os.environ["LLM_PROVIDER"] = provider
+        get_settings.cache_clear()
+        console.print(f"[bold yellow]⚡ 已通过 --provider 指定服务默认 LLM 渠道: {provider}[/bold yellow]")
+
     console.print(f"[bold cyan]🚀 正在启动 TalentGraph Web 服务：http://{host}:{port}[/bold cyan]")
     uvicorn.run("server:app", host=host, port=port, reload=reload, app_dir=str(backend_dir))
 

@@ -2,76 +2,67 @@
 """
 TalentGraph Global Settings Center
 Based on Pydantic V2 and pydantic-settings.
+Supports Official DeepSeek API (default deepseek-flash) and arbitrary named OpenAI-compatible
+relay stations via `.env` groups: RELAY_<NAME>_BASE_URL / RELAY_<NAME>_API_KEY / RELAY_<NAME>_MODEL.
 """
 
+import os
+import re
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# 默认顶层数据根目录: talent_graph/data
+# 默认顶层数据根目录: talent-graph/data
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
+
+_RELAY_VAR_RE = re.compile(r"^RELAY_([A-Z0-9_]+)_(BASE_URL|API_KEY|MODEL)$", re.IGNORECASE)
+
+
+class LLMProviderProfile(BaseModel):
+    """单个 LLM 渠道的标准化连接配置（仅在服务端内部消费，严禁序列化暴露 API Key）"""
+
+    name: str = Field(..., description="渠道名称: deepseek | relay_<name> | mock")
+    base_url: str = Field(..., repr=False, description="OpenAI 兼容 API 基础地址")
+    api_key: str = Field(default="", repr=False, description="渠道 API 密钥")
+    model: str = Field(..., description="默认调用模型名")
+    is_official: bool = Field(default=False, description="是否为官方 DeepSeek 渠道")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(".env", "../.env", "talent_graph/backend/.env"),
+        env_file=(".env", "../.env", "backend/.env"),
         env_file_encoding="utf-8",
-        extra="ignore",
+        extra="allow",
         case_sensitive=False,
     )
 
     # -------------------------------------------------------------------------
-    # 1. LLM 核心配置 (默认优先使用 DeepSeek)
+    # 1. LLM 核心配置 (官方 DeepSeek + 任意数量 RELAY_<NAME>_* 中转站)
     # -------------------------------------------------------------------------
-    llm_provider: Literal["deepseek", "openai", "dashscope", "qwen", "mock"] = Field(
+    llm_provider: str = Field(
         default="deepseek",
-        description="LLM 服务提供商",
+        description="激活的 LLM 渠道名称: deepseek | relay_<name> | mock",
     )
 
-    # DeepSeek 配置
+    # 官方 DeepSeek API 配置
     deepseek_api_key: Optional[str] = Field(
         default=None,
-        description="DeepSeek API 密钥",
+        description="官方 DeepSeek API 密钥",
     )
     deepseek_base_url: str = Field(
         default="https://api.deepseek.com/v1",
-        description="DeepSeek API 基础地址",
+        description="官方 DeepSeek API 基础地址",
     )
     deepseek_model: str = Field(
-        default="deepseek-chat",
+        default="deepseek-flash",
         validation_alias=AliasChoices("deepseek_model", "deepseek_model_name"),
-        description="DeepSeek 模型名称 (如 deepseek-chat)",
+        description="官方 DeepSeek 默认模型名称 (默认 deepseek-flash，可按需覆盖)",
     )
 
-    # OpenAI 备用配置
-    openai_api_key: Optional[str] = Field(
-        default=None,
-        description="OpenAI API 密钥",
-    )
-    openai_base_url: str = Field(
-        default="https://api.openai.com/v1",
-        description="OpenAI API 基础地址",
-    )
-    openai_model: str = Field(
-        default="gpt-4o",
-        validation_alias=AliasChoices("openai_model", "openai_model_name"),
-        description="OpenAI 模型名称",
-    )
-
-    # 阿里通义千问 备用配置
-    dashscope_api_key: Optional[str] = Field(
-        default=None,
-        description="阿里云 DashScope API 密钥",
-    )
-    qwen_model_name: str = Field(
-        default="qwen-plus",
-        description="DashScope 模型名称",
-    )
-
-    # 通用 LLM 调用参数
+    # 通用 LLM 调用治理参数
     llm_max_concurrency: int = Field(
         default=20,
         description="LLM 最大异步并发请求数",
@@ -90,24 +81,31 @@ class Settings(BaseSettings):
     )
 
     # -------------------------------------------------------------------------
-    # 2. 向量计算配置 (纯 CPU 轻量 ONNX 或 API)
+    # 2. 向量计算配置 (默认纯 CPU 本地 ONNX；可选通用 OpenAI 兼容 Embedding API)
     # -------------------------------------------------------------------------
     embedding_provider: Literal["onnx", "api", "bge", "local", "auto", "mock"] = Field(
         default="onnx",
-        description="向量计算引擎提供商: onnx(本地CPU ONNX) | api(百炼/OpenAI向量API) | auto(自动优选)",
+        description="向量计算引擎提供商: onnx(本地CPU ONNX) | api(通用 OpenAI 兼容向量 API) | auto(自动优选)",
     )
     embedding_model: str = Field(
         default="BAAI/bge-small-zh-v1.5",
         validation_alias=AliasChoices("embedding_model", "bge_model_name"),
-        description="向量模型名称或本地 ONNX 目录/文件路径",
+        description="本地 ONNX 向量模型名称或目录/文件路径",
     )
-    dashscope_embedding_model: str = Field(
-        default="text-embedding-v3",
-        description="阿里云百炼云端向量模型名称 (512维)",
+    embedding_api_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias=AliasChoices("embedding_api_base_url", "openai_base_url"),
+        description="通用 OpenAI 兼容 Embedding API 基础地址（可接中转站或 OpenAI）",
     )
-    openai_embedding_model: str = Field(
+    embedding_api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("embedding_api_key", "openai_api_key"),
+        description="通用 OpenAI 兼容 Embedding API 密钥",
+    )
+    embedding_api_model: str = Field(
         default="text-embedding-3-small",
-        description="OpenAI 云端向量模型名称 (512维)",
+        validation_alias=AliasChoices("embedding_api_model", "openai_embedding_model"),
+        description="通用 OpenAI 兼容 Embedding 模型名称",
     )
     embedding_batch_size: int = Field(
         default=32,
@@ -203,17 +201,11 @@ class Settings(BaseSettings):
         description="PDF 页面加载等待策略",
     )
 
-    # -------------------------------------------------------------------------
-    # 6. Mock 与独立运行规范配置
-    # -------------------------------------------------------------------------
-    mock_email: bool = Field(
-        default=True,
-        description="邮件功能 Mock 模式 (仅打 Log，不发起真实 SMTP 发送)",
-    )
-    enable_telemetry: bool = Field(
-        default=False,
-        description="是否开启任何外部埋点上报 (默认关闭，纯粹无副作用)",
-    )
+    @field_validator("llm_provider", mode="before")
+    @classmethod
+    def normalize_llm_provider(cls, v: object) -> str:
+        text = str(v or "deepseek").strip().lower()
+        return text or "deepseek"
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -224,6 +216,138 @@ class Settings(BaseSettings):
             return [orig.strip() for orig in v.split(",") if orig.strip()]
         return v
 
+    # -------------------------------------------------------------------------
+    # 多渠道 LLM 发现与解析助手
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def is_valid_api_key(key: Optional[str]) -> bool:
+        """判断 API Key 是否为非占位符的有效密钥"""
+        if not key:
+            return False
+        cleaned = key.strip()
+        lower = cleaned.lower()
+        if not cleaned or lower in ("mock", "mock_key", "none", "null"):
+            return False
+        if "your_" in lower or "your-" in lower or cleaned.startswith("<"):
+            return False
+        return True
+
+    def _discover_relay_raw(self) -> Dict[str, Dict[str, str]]:
+        """从 .env (model_extra) 与 os.environ 自动发现所有 RELAY_<NAME>_(BASE_URL|API_KEY|MODEL) 分组"""
+        merged: Dict[str, str] = {}
+        # 1. 先加载 .env / 初始化传入的额外键
+        if self.model_extra:
+            for k, val in self.model_extra.items():
+                if val is not None and _RELAY_VAR_RE.match(k):
+                    merged[k.upper()] = str(val).strip()
+        # 2. os.environ 覆盖 .env（与 pydantic-settings 标准优先级一致）
+        for k, val in os.environ.items():
+            if _RELAY_VAR_RE.match(k):
+                merged[k.upper()] = val.strip()
+
+        grouped: Dict[str, Dict[str, str]] = {}
+        for key, val in merged.items():
+            m = _RELAY_VAR_RE.match(key)
+            if not m:
+                continue
+            raw_name, field_name = m.group(1).lower(), m.group(2).lower()
+            relay_id = raw_name if raw_name.startswith("relay_") else f"relay_{raw_name}"
+            grouped.setdefault(relay_id, {})[field_name] = val
+        return grouped
+
+    def get_official_deepseek_profile(self) -> LLMProviderProfile:
+        """构造官方 DeepSeek API 渠道配置"""
+        api_key = (self.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+        return LLMProviderProfile(
+            name="deepseek",
+            base_url=self.deepseek_base_url.strip().rstrip("/"),
+            api_key=api_key,
+            model=self.deepseek_model.strip() or "deepseek-flash",
+            is_official=True,
+        )
+
+    def get_relay_profiles(self) -> Dict[str, LLMProviderProfile]:
+        """返回所有配置完整、可用的中转站渠道映射"""
+        raw = self._discover_relay_raw()
+        profiles: Dict[str, LLMProviderProfile] = {}
+        for relay_id, fields in raw.items():
+            base_url = fields.get("base_url", "").strip().rstrip("/")
+            api_key = fields.get("api_key", "").strip()
+            model = fields.get("model", "").strip()
+            if base_url and self.is_valid_api_key(api_key) and model:
+                profiles[relay_id] = LLMProviderProfile(
+                    name=relay_id,
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    is_official=False,
+                )
+        return profiles
+
+    def get_available_llm_providers(self) -> List[str]:
+        """返回当前环境已配置可用的渠道名称列表（脱敏，绝不暴露 Key/URL）"""
+        available: List[str] = []
+        official = self.get_official_deepseek_profile()
+        if self.is_valid_api_key(official.api_key):
+            available.append("deepseek")
+        available.extend(sorted(self.get_relay_profiles().keys()))
+        if self.llm_provider == "mock" and "mock" not in available:
+            available.append("mock")
+        return available
+
+    def resolve_llm_provider(
+        self,
+        provider_name: Optional[str] = None,
+    ) -> Tuple[LLMProviderProfile, Optional[str]]:
+        """
+        解析目标 LLM 渠道配置。
+        若指定的中转站未配置或缺少字段，返回 (官方 DeepSeek 配置, 降级原因说明)，由调用方记录 WARNING 并自动降级。
+        """
+        cleaned_override = (provider_name or "").strip().lower()
+        target = cleaned_override or (self.llm_provider or "deepseek").strip().lower()
+        official = self.get_official_deepseek_profile()
+
+        if target == "mock":
+            return (
+                LLMProviderProfile(
+                    name="mock",
+                    base_url=official.base_url,
+                    api_key="mock_key",
+                    model=official.model,
+                    is_official=False,
+                ),
+                None,
+            )
+
+        if target == "deepseek":
+            return official, None
+
+        relays = self.get_relay_profiles()
+        norm_id = target if target.startswith("relay_") else f"relay_{target}"
+        if norm_id in relays:
+            return relays[norm_id], None
+
+        raw_relays = self._discover_relay_raw()
+        if norm_id in raw_relays:
+            fields = raw_relays[norm_id]
+            missing = []
+            if not fields.get("base_url", "").strip():
+                missing.append("BASE_URL")
+            if not self.is_valid_api_key(fields.get("api_key")):
+                missing.append("API_KEY")
+            if not fields.get("model", "").strip():
+                missing.append("MODEL")
+            reason = (
+                f"Relay provider '{norm_id}' is incomplete (missing {', '.join(missing)}); "
+                "falling back to official 'deepseek'."
+            )
+        else:
+            reason = f"Relay provider '{target}' is not configured; falling back to official 'deepseek'."
+        return official, reason
+
+    # -------------------------------------------------------------------------
+    # 运行时路径助手
+    # -------------------------------------------------------------------------
     def get_corpus_cache_dir(self) -> Path:
         return self.corpus_cache_dir or (self.data_root_dir / "cache" / "corpus")
 

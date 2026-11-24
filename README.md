@@ -106,37 +106,42 @@ git clone https://github.com/your-org/talent-graph.git
 cd talent-graph
 
 # 安装依赖 (建议在虚拟环境中运行)
-cd talent_graph/backend
+cd backend
 pip install -e ".[dev]"
 ```
 
 ### 2. 配置环境变量
 
-复制配置文件模版并填入您的 LLM API Key（支持 DeepSeek / 通义千问 Qwen / OpenAI）：
+复制配置文件模版并填入您的官方 DeepSeek 或 OpenAI 兼容中转站 API Key（支持任意多个中转站按需切换，故障自动降级回官方 DeepSeek）：
 
 ```bash
-cp .env.example .env
+cp backend/.env.example backend/.env
 ```
 
 `.env` 核心配置项示例：
 ```ini
-# LLM 提供商: deepseek | qwen | openai | mock
+# 默认 LLM 渠道: deepseek (官方) | relay_a | relay_b | mock
 LLM_PROVIDER=deepseek
 
-# DeepSeek 密钥与端点
+# 官方 DeepSeek API (同时作为中转站异常时的自动降级兜底)
 DEEPSEEK_API_KEY=sk-your-deepseek-key
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-flash
 
-# 阿里通义千问配置 (可选)
-# DASHSCOPE_API_KEY=sk-your-dashscope-key
-# QWEN_MODEL_NAME=qwen-plus
+# 多中转站按需配置 (OpenAI 兼容协议，支持任意 RELAY_<NAME>_* 组)
+# RELAY_A_BASE_URL=https://relay-a.example.com/v1
+# RELAY_A_API_KEY=sk-your-relay-a-key
+# RELAY_A_MODEL=deepseek-chat
+#
+# RELAY_B_BASE_URL=https://relay-b.example.com/v1
+# RELAY_B_API_KEY=sk-your-relay-b-key
+# RELAY_B_MODEL=deepseek-flash
 
 # 并发与超时
 LLM_MAX_CONCURRENCY=20
 LLM_TIMEOUT=60.0
 
-# 纯 CPU 向量引擎
+# 纯 CPU 本地向量引擎 (默认 ONNX，可选 EMBEDDING_PROVIDER=api 配合 EMBEDDING_API_*)
 EMBEDDING_PROVIDER=onnx
 EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 ```
@@ -144,9 +149,9 @@ EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 ### 3. 运行自动化测试套件
 
 ```bash
-pytest tests/ -v
+./scripts/check.sh
 ```
-*(全部 32 个单元测试与微秒级基准测试将在 2~3 秒内完成验证)*
+*(自动执行 ruff lint + mypy 类型检查 + 全量 pytest 覆盖率 + 纯 CPU 基准测试)*
 
 ---
 
@@ -156,25 +161,26 @@ TalentGraph 提供了开箱即用的统一 CLI 终端工具：
 
 ```bash
 # 1. 核心组件基准测速 (测试纯 CPU 向量引擎与 16 维评分器微秒级性能)
-python talent_graph/cli.py benchmark
+python cli.py benchmark
 
 # 2. 预热标准题库图谱 (提取并存入 SHA256 缓存)
-python talent_graph/cli.py prepare --corpus data/input/corpus/corpus.txt
+python cli.py prepare --corpus data/input/corpus/corpus.txt
 
 # 3. 执行端到端评测流水线，并在终端输出排行榜大盘
-python talent_graph/cli.py evaluate \
+python cli.py evaluate \
   --corpus data/input/corpus/corpus.txt \
   --group data/input/group_corpus/271_1.txt \
   --title "新能源战略研讨会"
 
-# 4. 执行评测并直接导出每位候选人的高清 PDF 报告
-python talent_graph/cli.py evaluate \
+# 4. 临时指定中转站渠道执行评测 (覆盖 .env 中的 LLM_PROVIDER)
+python cli.py evaluate \
   --corpus data/input/corpus/corpus.txt \
   --group data/input/group_corpus/271_1.txt \
+  --provider relay_a \
   --export-pdf
 
-# 5. 一键启动 Web 可视化大屏与 API 后端服务
-python talent_graph/cli.py server --port 8000
+# 5. 一键启动 Web 可视化大屏与 API 后端服务 (也支持 --provider 指定默认渠道)
+python cli.py server --port 8000
 ```
 
 ---

@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from configs.settings import Settings, get_settings
 from src.core.embedding import EmbeddingEngine, get_embedding_engine
+from src.core.llm_client import LLMClient
 from src.core.logger import get_logger
 from src.models.discussion import InteractionNetwork
 from src.models.report import (
@@ -38,10 +39,11 @@ class ReportGenerator:
         scoring_engine: Optional[ScoringEngine] = None,
         summarizer: Optional[CandidateSummarizer] = None,
         embedding_engine: Optional[EmbeddingEngine] = None,
+        llm_client: Optional[LLMClient] = None,
     ):
         self.settings = settings or get_settings()
         self.scoring_engine = scoring_engine or ScoringEngine(self.settings)
-        self.summarizer = summarizer or CandidateSummarizer(settings=self.settings)
+        self.summarizer = summarizer or CandidateSummarizer(llm_client=llm_client, settings=self.settings)
         self.embedding_engine = embedding_engine or get_embedding_engine(self.settings)
 
     def _build_collaboration_network_dto(self, network: InteractionNetwork) -> CollaborationNetworkDTO:

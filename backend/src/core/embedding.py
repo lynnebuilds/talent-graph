@@ -3,7 +3,7 @@
 Pure-CPU Neural & Cloud Embedding Engine (Zero PyTorch / Zero CUDA).
 Supports three execution backends in priority order:
 1. Pure-CPU ONNX Runtime + HuggingFace Tokenizers (BAAI/bge-small-zh-v1.5, 512-dim, ~1ms/text)
-2. Cloud Embedding API (DashScope text-embedding-v3 / OpenAI text-embedding-3-small, 512-dim)
+2. Cloud Embedding API (Generic OpenAI-compatible /embeddings endpoint, 512-dim)
 3. Synonym-Enhanced N-Gram Semantic Fallback (0 download, <0.1ms/text for offline/CI mode)
 """
 
@@ -71,12 +71,8 @@ class EmbeddingEngine:
                 )
 
     def _has_valid_embedding_api_key(self) -> bool:
-        ds_key = self.settings.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "")
-        oa_key = self.settings.openai_api_key or os.environ.get("OPENAI_API_KEY", "")
-        for k in (ds_key, oa_key):
-            if k and not k.startswith("mock") and "your_" not in k:
-                return True
-        return False
+        api_key = self.settings.embedding_api_key or os.environ.get("EMBEDDING_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        return Settings.is_valid_api_key(api_key)
 
     def _resolve_onnx_paths(self) -> Optional[Tuple[Path, Path]]:
         """查找本地 ONNX 模型权重与 tokenizer.json"""
@@ -246,22 +242,20 @@ class EmbeddingEngine:
         return np.vstack(chunks_out)
 
     def _embed_api_batch(self, texts: List[str]) -> np.ndarray:
-        """调用阿里云百炼 (text-embedding-v3) 或 OpenAI 兼容接口批量获取 512 维句向量"""
-        ds_key = self.settings.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "")
-        oa_key = self.settings.openai_api_key or os.environ.get("OPENAI_API_KEY", "")
+        """调用通用 OpenAI 兼容 /embeddings 接口批量获取 512 维句向量（支持任意中转站或 OpenAI）"""
+        api_key = (
+            self.settings.embedding_api_key
+            or os.environ.get("EMBEDDING_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        ).strip()
 
-        if ds_key and not ds_key.startswith("mock") and "your_" not in ds_key:
-            api_key = ds_key
-            base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            model = self.settings.dashscope_embedding_model
-            max_batch = min(10, self.settings.embedding_batch_size)  # DashScope v3 单批上限 10 条
-        elif oa_key and not oa_key.startswith("mock") and "your_" not in oa_key:
-            api_key = oa_key
-            base_url = self.settings.openai_base_url.rstrip("/")
-            model = self.settings.openai_embedding_model
-            max_batch = min(64, self.settings.embedding_batch_size)
-        else:
+        if not Settings.is_valid_api_key(api_key):
             return np.vstack([self._compute_native_vector(t) for t in texts])
+
+        base_url = self.settings.embedding_api_base_url.strip().rstrip("/")
+        model = self.settings.embedding_api_model.strip() or "text-embedding-3-small"
+        max_batch = min(64, self.settings.embedding_batch_size)
 
         cleaned = [t.replace("\n", " ").strip()[:2000] or "空" for t in texts]
         all_vecs: List[np.ndarray] = []
@@ -287,7 +281,11 @@ class EmbeddingEngine:
                     all_vecs.append(self._align_and_normalize(batch_mat))
             return np.vstack(all_vecs)
         except Exception as exc:
-            logger.warning(f"Cloud Embedding API call failed, falling back to CPU vectorizer: {exc}")
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            status_part = f" (status={status})" if status is not None else ""
+            logger.warning(
+                f"Cloud Embedding API call failed [{type(exc).__name__}{status_part}], falling back to CPU vectorizer."
+            )
             return np.vstack([self._compute_native_vector(t) for t in texts])
 
     def embed_text(self, text: str) -> np.ndarray:

@@ -98,3 +98,44 @@ def test_synonym_alignment_and_jump_distance():
     assert jump > 0.5
 
 
+def test_embedding_generic_openai_compatible_api_without_dashscope(monkeypatch):
+    """验证 Embedding api 模式使用通用 OpenAI 兼容端点，完全去除 DashScope 依赖"""
+    from unittest.mock import MagicMock, patch
+
+    from configs.settings import Settings
+    from src.core.embedding import EmbeddingEngine
+
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    settings = Settings(
+        _env_file=None,
+        embedding_provider="api",
+        embedding_api_base_url="https://custom-relay.test/v1/",
+        embedding_api_key="sk-custom-emb-key",
+        embedding_api_model="bge-m3-relay",
+    )
+    engine = EmbeddingEngine(settings=settings)
+    assert engine.backend_mode == "api"
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": [{"index": 0, "embedding": [1.0] * 512}],
+    }
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.post.return_value = mock_resp
+
+    with patch("src.core.embedding.httpx.Client", return_value=mock_client):
+        vec = engine.embed_text("测试通用向量中转站")
+
+    assert vec.shape == (512,)
+    mock_client.post.assert_called_once()
+    call_args = mock_client.post.call_args
+    assert call_args.args[0] == "https://custom-relay.test/v1/embeddings"
+    assert call_args.kwargs["headers"]["Authorization"] == "Bearer sk-custom-emb-key"
+    assert call_args.kwargs["json"]["model"] == "bge-m3-relay"
+
+
+

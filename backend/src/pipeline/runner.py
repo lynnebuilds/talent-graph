@@ -22,6 +22,7 @@ from src.core.embedding import EmbeddingEngine, get_embedding_engine
 from src.core.llm_client import LLMClient, get_llm_client
 from src.core.logger import get_logger
 from src.knowledge.cache import GraphCacheManager, get_graph_cache_manager
+from src.knowledge.extractor import StandardGraphExtractor
 from src.models.discussion import DiscussionTranscript, InteractionNetwork
 from src.models.graph import CandidateGraph, StandardGraph
 from src.pipeline.arc_verifier import CandidateArcVerifier
@@ -56,7 +57,15 @@ class PipelineRunner:
         self.settings = settings or get_settings()
         self.llm = llm_client or get_llm_client(self.settings)
         self.embedding = embedding_engine or get_embedding_engine(self.settings)
-        self.cache_manager = cache_manager or get_graph_cache_manager(self.settings)
+        if cache_manager is not None:
+            self.cache_manager = cache_manager
+        elif llm_client is not None or settings is not None:
+            self.cache_manager = GraphCacheManager(
+                extractor=StandardGraphExtractor(llm_client=self.llm, settings=self.settings),
+                settings=self.settings,
+            )
+        else:
+            self.cache_manager = get_graph_cache_manager(self.settings)
 
         self.parser = DiscussionParser(host_speaker_id=self.settings.host_speaker_id)
         self.interaction_extractor = InteractionExtractor(llm_client=self.llm, settings=self.settings)
